@@ -156,7 +156,7 @@ class AssHandler(
             // When media without external subtitles, format id will not change.
             // When media with external subtitles, format will become like 1:1 .
             // So to compat both situation, we extract the actual id after the colon.
-            if (format?.id?.substringAfter(":") == it.key) {
+            if (format?.id == it.key || format?.id?.substringAfter(":") == it.key) {
                 it.value
             } else {
                 null
@@ -324,16 +324,13 @@ class AssHandler(
      * Retrieves the selected video track, if any.
      */
     private fun getSelectedVideoTrack(tracks: Tracks): Format? {
-        return tracks.groups.find { group ->
-            if (group.isSelected) {
-                (0 until group.length).any { index ->
-                    val track = group.getTrackFormat(index)
-                    MimeTypes.isVideo(track.sampleMimeType)
-                }
-            } else {
-                false
+        return tracks.groups.asSequence()
+            .flatMap { group ->
+                (0 until group.length).asSequence()
+                    .filter(group::isTrackSelected)
+                    .map(group::getTrackFormat)
             }
-        }?.getTrackFormat(0)
+            .firstOrNull { track -> MimeTypes.isVideo(track.sampleMimeType) }
     }
 
     /**
@@ -342,16 +339,13 @@ class AssHandler(
      * @return The ID of the selected ASS track, or null if none.
      */
     private fun getSelectedAssTrack(tracks: Tracks): Format? {
-        return tracks.groups.find { group ->
-            if (group.isSelected) {
-                (0 until group.length).any { index ->
-                    val track = group.getTrackFormat(index)
-                    track.sampleMimeType == TEXT_SSA || track.codecs == TEXT_SSA
-                }
-            } else {
-                false
+        return tracks.groups.asSequence()
+            .flatMap { group ->
+                (0 until group.length).asSequence()
+                    .filter(group::isTrackSelected)
+                    .map(group::getTrackFormat)
             }
-        }?.getTrackFormat(0)
+            .firstOrNull { track -> track.sampleMimeType == TEXT_SSA || track.codecs == TEXT_SSA }
     }
 
     /**
