@@ -14,6 +14,14 @@ import io.github.peerless2012.ass.media.AssHandler
  */
 @OptIn(UnstableApi::class)
 class AssRenderer(private val assHandler: AssHandler): NoSampleRenderer() {
+    private var releaseAssHandler = false
+
+    internal constructor(
+        assHandler: AssHandler,
+        releaseAssHandler: Boolean
+    ) : this(assHandler) {
+        this.releaseAssHandler = releaseAssHandler
+    }
 
     override fun getName(): String {
         return "AssRenderer"
@@ -21,6 +29,10 @@ class AssRenderer(private val assHandler: AssHandler): NoSampleRenderer() {
 
     override fun render(positionUs: Long, elapsedRealtimeUs: Long) {
         assHandler.videoTime = positionUs - 1000000000000L
+    }
+
+    override fun release() {
+        if (releaseAssHandler) assHandler.releaseFromRenderer()
     }
 
 }

@@ -44,7 +44,7 @@ fun ExoPlayer.Builder.buildWithAssSupport(
 
     val player = this
         .setMediaSourceFactory(mediaSourceFactory)
-        .setRenderersFactory(renderersFactory.withAssSupport(assHandler))
+        .setRenderersFactory(AssRenderersFactory(assHandler, renderersFactory, true))
         .build()
 
     if (renderType === AssRenderType.OVERLAY_CANVAS || renderType === AssRenderType.OVERLAY_OPEN_GL) {
