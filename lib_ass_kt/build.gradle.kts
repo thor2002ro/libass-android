@@ -2,6 +2,9 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
+val isWindowsHost = System.getProperty("os.name").contains("Windows", ignoreCase = true)
+val prebuiltLibassAar = rootProject.layout.projectDirectory.file("OUTPUT/lib_ass-release.aar").asFile
+
 android {
     namespace = "io.github.peerless2012.ass.kt"
     compileSdk = 36
@@ -53,7 +56,14 @@ android {
 }
 
 dependencies {
-    implementation(project(":lib_ass"))
+    if (isWindowsHost) {
+        check(prebuiltLibassAar.isFile) {
+            "Missing ${prebuiltLibassAar.absolutePath}. Run dependencies/libass-android/rebuild-libass-wsl.bat before building on Windows."
+        }
+        compileOnly(files(prebuiltLibassAar))
+    } else {
+        implementation(project(":lib_ass"))
+    }
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -63,10 +63,10 @@ index 01bb8a8..fbaca7a 100644
 +#if __has_builtin(__builtin_ia32_pmovmskb128) && defined(__SSE2__)
 +#define VEC_ANY_ZERO(x) (__builtin_ia32_pmovmskb128((x) == 0) != 0)
 +#define VECTOR_SIZE 16
-+#elif __has_builtin(__builtin_neon_vminvq_u8) && defined(__ARM_NEON__)
++#elif __has_builtin(__builtin_neon_vminvq_u8) && defined(__ARM_NEON__) && defined(__aarch64__)
 +#define VEC_ANY_ZERO(x) (__builtin_neon_vminvq_u8(x) == 0)
 +#define VECTOR_SIZE 16
-+#elif __has_builtin(__builtin_aarch64_reduc_umin_scal_v16qi_uu) && defined(__ARM_NEON__)
++#elif __has_builtin(__builtin_aarch64_reduc_umin_scal_v16qi_uu) && defined(__ARM_NEON__) && defined(__aarch64__)
 +#define VEC_ANY_ZERO(x) (__builtin_aarch64_reduc_umin_scal_v16qi_uu(x) == 0)
 +#define VECTOR_SIZE 16
 +#endif
