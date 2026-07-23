@@ -563,10 +563,16 @@ class AssHandler(
     private val Size.isValid
         get() = width > 0 && height > 0
 
-    private companion object {
-        const val MAX_EMBEDDED_FONTS = 256
-        const val MAX_EMBEDDED_FONT_CANDIDATES = 1024
-        const val CANDIDATE_BUDGET_MULTIPLIER = 4L
+    companion object {
+        val version: String
+            get() = Ass.version
+
+        val libraryVersion: String
+            get() = Ass.libraryVersion
+
+        private const val MAX_EMBEDDED_FONTS = 256
+        private const val MAX_EMBEDDED_FONT_CANDIDATES = 1024
+        private const val CANDIDATE_BUDGET_MULTIPLIER = 4L
     }
 
     /**

@@ -164,6 +164,12 @@ static jlong nativeAssInit(JNIEnv *env, jclass clazz) {
     return (jlong) (intptr_t) library;
 }
 
+static jint nativeAssLibraryVersion(JNIEnv *env, jclass clazz) {
+    (void) env;
+    (void) clazz;
+    return ass_library_version();
+}
+
 static void nativeAssAddFont(
     JNIEnv *env,
     jclass clazz,
@@ -202,6 +208,7 @@ static void nativeAssDeinit(JNIEnv *env, jclass clazz, jlong ass) {
 
 static JNINativeMethod method_table[] = {
     {"nativeAssInit", "()J", (void *) nativeAssInit},
+    {"nativeAssLibraryVersion", "()I", (void *) nativeAssLibraryVersion},
     {"nativeAssAddFont", "(JLjava/lang/String;[B)V", (void *) nativeAssAddFont},
     {"nativeAssClearFont", "(J)V", (void *) nativeAssClearFont},
     {"nativeAssDeinit", "(J)V", (void *) nativeAssDeinit},
