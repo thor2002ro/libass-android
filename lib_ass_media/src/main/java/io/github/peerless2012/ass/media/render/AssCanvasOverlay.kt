@@ -34,7 +34,7 @@ class AssCanvasOverlay(private val handler: AssHandler, private val render: AssR
         super.configure(videoSize)
         this.videoSize = videoSize
         renderSize = handler.computeRenderSize(videoSize.width, videoSize.height)
-        executor = AssExecutor(render)
+        executor = AssExecutor(handler::renderFrame, handler.config.performanceStatsCollector)
         render.setFrameSize(renderSize.width, renderSize.height)
     }
 

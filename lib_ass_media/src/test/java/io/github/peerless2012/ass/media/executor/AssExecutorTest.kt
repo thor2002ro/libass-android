@@ -2,6 +2,7 @@ package io.github.peerless2012.ass.media.executor
 
 import io.github.peerless2012.ass.AssFrame
 import io.github.peerless2012.ass.AssTexType
+import io.github.peerless2012.ass.media.AssPerformanceStatsCollector
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -17,14 +18,18 @@ class AssExecutorTest {
         val firstStarted = CountDownLatch(1)
         val releaseFirst = CountDownLatch(1)
         val renderTimes = CopyOnWriteArrayList<Long>()
-        val executor = AssExecutor { timeMs, _ ->
-            renderTimes += timeMs
-            if (timeMs == 1L) {
-                firstStarted.countDown()
-                assertTrue(releaseFirst.await(2, TimeUnit.SECONDS))
-            }
-            AssFrame(null, timeMs.toInt())
-        }
+        val stats = AssPerformanceStatsCollector()
+        val executor = AssExecutor(
+            frameRenderer = { timeMs, _ ->
+                renderTimes += timeMs
+                if (timeMs == 1L) {
+                    firstStarted.countDown()
+                    assertTrue(releaseFirst.await(2, TimeUnit.SECONDS))
+                }
+                AssFrame(null, timeMs.toInt())
+            },
+            statsCollector = stats,
+        )
 
         val firstFrame = AtomicReference<AssFrame?>()
         val secondFrame = AtomicReference<AssFrame?>()
@@ -60,6 +65,7 @@ class AssExecutorTest {
             assertEquals(1, firstFrame.get()?.changed)
             assertEquals(3, thirdFrame.get()?.changed)
             assertEquals(listOf(1L, 3L), renderTimes.toList())
+            assertEquals(1L, stats.snapshot().supersededRequestCount)
         } finally {
             releaseFirst.countDown()
             executor.shutdown()
@@ -143,6 +149,7 @@ class AssExecutorTest {
         val firstStarted = CountDownLatch(1)
         val releaseFirst = CountDownLatch(1)
         val firstFinished = CountDownLatch(1)
+        val stats = AssPerformanceStatsCollector()
         val executor = AssExecutor(
             frameRenderer = { timeMs, _ ->
                 if (timeMs == 1L) {
@@ -153,12 +160,14 @@ class AssExecutorTest {
                 AssFrame(null, timeMs.toInt())
             },
             renderWaitTimeoutMs = 1,
+            statsCollector = stats,
         )
 
         try {
             val firstFrame = executor.renderFrame(1_000, AssTexType.BITMAP_ALPHA)
             assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
             assertEquals(0, firstFrame?.changed)
+            assertEquals(1L, stats.snapshot().executorTimeoutCount)
 
             releaseFirst.countDown()
             assertTrue(firstFinished.await(2, TimeUnit.SECONDS))

@@ -78,13 +78,13 @@ class AssSubtitleCanvasView : View, AssSubtitleRender {
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         assHandler.render?.let {
-            assExecutor = AssExecutor(it)
+            assExecutor = AssExecutor(assHandler::renderFrame, assHandler.config.performanceStatsCollector)
         }
         assHandler.renderCallback = { assRender ->
             assExecutor?.shutdown()
             assExecutor = null
             if (assRender != null) {
-                assExecutor = AssExecutor(assRender)
+                assExecutor = AssExecutor(assHandler::renderFrame, assHandler.config.performanceStatsCollector)
             }
         }
 
