@@ -1,29 +1,34 @@
 package io.github.peerless2012.ass.media
 
 data class AssHandlerConfig(
-    val glyphSize: Int = 10000,
+    val glyphSize: Int = 10_000,
     val cacheSize: Int = 128,
 
     /**
-     * Maximum number of pixels (width * height) for subtitle rendering.
+     * Maximum number of pixels (`width * height`) used for subtitle rasterization.
      *
-     * When the target frame size exceeds this limit, the render size will be
-     * proportionally downscaled while maintaining the aspect ratio.
-     *
-     * This reduces CPU and memory usage on high-resolution displays (e.g., 4K TVs)
-     * at the cost of slightly lower subtitle sharpness.
-     *
-     * Examples:
-     * - 1920 * 1080 = 2_073_600 (limit to 1080p)
-     * - 2560 * 1440 = 3_686_400 (limit to 1440p)
-     * - 0 = no limit, render at full frame size (default)
-     *
-     * Only applies to OVERLAY and EFFECTS render types. CUES mode is not affected.
+     * A value of `0` renders at the full target size. `1920 * 1080` is a useful
+     * balanced setting for 4K playback; leave this at `0` for maximum sharpness.
      */
     val maxRenderPixels: Int = 0,
 
+    /** Optional stats collector owned by the app. */
+    val performanceStatsCollector: AssPerformanceStatsCollector? = null,
+
     /**
-     * Optional stats collector owned by the app.
+     * Maximum ASS animation update rate, driven by presentation timestamps.
+     *
+     * - `60` keeps karaoke, transforms, and moving signs smooth.
+     * - `30` is a balanced battery-saving option.
+     * - `0` disables throttling.
      */
-    val performanceStatsCollector: AssPerformanceStatsCollector? = null
+    val maxSubtitleFps: Float = 60f,
+
+    /**
+     * Maximum width or height of an alpha-atlas page.
+     *
+     * `0` uses the device's `GL_MAX_TEXTURE_SIZE`. A smaller value reduces peak
+     * upload size at the cost of additional atlas pages and draw calls.
+     */
+    val maxAtlasTextureSize: Int = 0,
 )

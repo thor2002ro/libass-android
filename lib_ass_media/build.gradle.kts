@@ -1,8 +1,5 @@
-import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
-
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.maven.publish)
 }
 
 android {
@@ -20,7 +17,7 @@ android {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
+                "proguard-rules.pro",
             )
         }
     }
@@ -29,7 +26,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-
 }
 
 dependencies {
@@ -38,15 +34,12 @@ dependencies {
     implementation(libs.androidx.media3.exo)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.effect)
-    implementation("io.github.peerless2012:ass-kt:0.5.0-beta01")
+
+    // The atlas API is introduced by this patch and must be compiled from the
+    // matching local module rather than the older published beta artifact.
+    implementation(project(":lib_ass_kt"))
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-}
-
-mavenPublishing {
-    publishToMavenCentral()
-    // https://vanniktech.github.io/gradle-maven-publish-plugin/what/
-    configure(AndroidSingleVariantLibrary())
-    signAllPublications()
 }

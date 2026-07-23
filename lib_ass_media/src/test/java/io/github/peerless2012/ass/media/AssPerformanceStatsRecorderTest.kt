@@ -1,5 +1,6 @@
 package io.github.peerless2012.ass.media
 
+import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.AssFrame
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -48,6 +49,32 @@ class AssPerformanceStatsRecorderTest {
         assertEquals(1L, collector.snapshot().renderCount)
         collector.reset()
         assertEquals(0L, collector.snapshot().renderCount)
+    }
+
+    @Test
+    fun recordsAtlasFrames() {
+        val collector = AssPerformanceStatsCollector()
+        val frame = AssAtlasFrame(
+            pages = null,
+            pageWidths = intArrayOf(16),
+            pageHeights = intArrayOf(16),
+            quads = intArrayOf(
+                0, 0, 3, 4, 0, 0, 0, 0,
+                8, 8, 5, 6, 0, 0, 4, 0,
+            ),
+            changed = AssAtlasFrame.CHANGE_CONTENT,
+        )
+
+        collector.record(2_000_000, frame)
+        val stats = collector.snapshot()
+
+        assertEquals(1L, stats.renderCount)
+        assertEquals(1L, stats.changedRenderCount)
+        assertEquals(0L, stats.emptyRenderCount)
+        assertEquals(2L, stats.imageCount)
+        assertEquals(2, stats.maxImageCount)
+        assertEquals(30L, stats.maxBitmapPixels)
+        assertEquals(42L, stats.totalBitmapPixels)
     }
 
     private fun testTex(width: Int, height: Int) =

@@ -20,4 +20,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "libass-android"
+include(":lib_ass")
+include(":lib_ass_kt")
 include(":lib_ass_media")

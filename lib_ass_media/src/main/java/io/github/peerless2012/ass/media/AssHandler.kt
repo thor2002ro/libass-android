@@ -14,6 +14,7 @@ import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import io.github.peerless2012.ass.Ass
+import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.AssFrame
 import io.github.peerless2012.ass.AssRender
 import io.github.peerless2012.ass.AssTexType
@@ -85,10 +86,8 @@ class AssHandler(
     var surfaceSize = Size.ZERO
         private set
 
-    /**  The video frame time. (default is 24fps)  */
-    val videoFramePeriod = 3
-
-    private var videoFrameIndex = 0
+    private val subtitleRenderClock = SubtitleRenderClock(config.maxSubtitleFps)
+    private var pixelAspectRatio: Double = 1.0
 
     var videoTime = -1L
         set(value) {
@@ -96,12 +95,8 @@ class AssHandler(
                 return
             }
             field = value
-            if (videoFrameIndex == 0) {
+            if (subtitleRenderClock.shouldRender(value)) {
                 videoTimeCallback?.invoke(value)
-            }
-            videoFrameIndex++
-            if (videoFrameIndex >= videoFramePeriod) {
-                videoFrameIndex %= videoFramePeriod
             }
         }
 
@@ -173,8 +168,9 @@ class AssHandler(
             ass.clearFont()
         }
         videoSize = Size.ZERO
+        pixelAspectRatio = 1.0
         videoTime = -1
-        videoFrameIndex = 0
+        subtitleRenderClock.reset()
         config.performanceStatsCollector?.reset()
         if (updatePlayer) renderCallback?.invoke(null)
     }
@@ -190,7 +186,11 @@ class AssHandler(
 
         val selectedVideoTrack = getSelectedVideoTrack(tracks)
         if (selectedVideoTrack != null) {
-            setVideoSize(selectedVideoTrack.width, selectedVideoTrack.height)
+            updateVideoGeometry(
+                selectedVideoTrack.width,
+                selectedVideoTrack.height,
+                selectedVideoTrack.pixelWidthHeightRatio.toValidPixelAspect(),
+            )
         }
 
         format = getSelectedAssTrack(tracks)
@@ -223,6 +223,7 @@ class AssHandler(
         this.track = track
         val render = requireNotNull(render)
         render.setStorageSize(videoSize.width, videoSize.height)
+        render.setPixelAspect(pixelAspectRatio)
         if (renderType == AssRenderType.OVERLAY_CANVAS || renderType == AssRenderType.OVERLAY_OPEN_GL) {
             val renderSize = computeRenderSize(surfaceSize.width, surfaceSize.height)
             render.setFrameSize(renderSize.width, renderSize.height)
@@ -266,8 +267,16 @@ class AssHandler(
 
     override fun onVideoSizeChanged(videoSize: VideoSize) {
         super.onVideoSizeChanged(videoSize)
-        this.videoSize = Size(videoSize.width, videoSize.height)
-        Log.i("AssHandler", "onVideoSizeChanged: width = ${videoSize.width}, height = ${videoSize.height}")
+        updateVideoGeometry(
+            videoSize.width,
+            videoSize.height,
+            videoSize.pixelWidthHeightRatio.toValidPixelAspect(),
+        )
+        Log.i(
+            "AssHandler",
+            "onVideoSizeChanged: width=${videoSize.width}, height=${videoSize.height}, " +
+                "pixelAspect=$pixelAspectRatio",
+        )
     }
 
     /**
@@ -277,8 +286,22 @@ class AssHandler(
      * @param height The height of the video.
      */
     fun setVideoSize(width: Int, height: Int) {
-        Log.i("AssHandler", "setVideoSize: width = $width, height = $height")
+        updateVideoGeometry(width, height, pixelAspectRatio)
+    }
+
+    private fun updateVideoGeometry(width: Int, height: Int, pixelAspect: Double) {
+        Log.i(
+            "AssHandler",
+            "setVideoSize: width=$width, height=$height, pixelAspect=$pixelAspect",
+        )
         videoSize = Size(width, height)
+        pixelAspectRatio = pixelAspect
+        render?.let { renderer ->
+            if (videoSize.isValid) {
+                renderer.setStorageSize(videoSize.width, videoSize.height)
+            }
+            renderer.setPixelAspect(pixelAspectRatio)
+        }
     }
 
     fun resetPerformanceStats() {
@@ -290,6 +313,16 @@ class AssHandler(
         val stats = config.performanceStatsCollector ?: return render.renderFrame(timeMs, type)
         val startedNs = System.nanoTime()
         val frame = render.renderFrame(timeMs, type)
+        stats.record(System.nanoTime() - startedNs, frame)
+        return frame
+    }
+
+    internal fun renderAtlasFrame(timeMs: Long, maxAtlasSize: Int): AssAtlasFrame? {
+        val render = render ?: return null
+        val stats = config.performanceStatsCollector
+            ?: return render.renderAtlasFrame(timeMs, maxAtlasSize)
+        val startedNs = System.nanoTime()
+        val frame = render.renderAtlasFrame(timeMs, maxAtlasSize)
         stats.record(System.nanoTime() - startedNs, frame)
         return frame
     }
@@ -424,6 +457,7 @@ class AssHandler(
             if (videoSize.isValid) {
                 render.setStorageSize(videoSize.width, videoSize.height)
             }
+            render.setPixelAspect(pixelAspectRatio)
             val frameSizeSource =
                 if (
                     (renderType == AssRenderType.OVERLAY_CANVAS ||
@@ -519,6 +553,9 @@ class AssHandler(
             handler.post { rendererCallback(null) }
         }
     }
+
+    private fun Float.toValidPixelAspect(): Double =
+        takeIf { it.isFinite() && it > 0f }?.toDouble() ?: 1.0
 
     /**
      * Checks if the size is valid (both width and height are greater than 0).
