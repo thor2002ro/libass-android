@@ -193,6 +193,7 @@ internal class AssPerformanceStatsRecorder(
     }
 
     private fun recordImagePixels(pixels: Long) {
+        if (pixels <= 0L) return
         maxBitmapPixels = maxOf(maxBitmapPixels, pixels)
         totalBitmapPixels += pixels
     }

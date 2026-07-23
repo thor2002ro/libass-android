@@ -77,6 +77,20 @@ class AssPerformanceStatsRecorderTest {
         assertEquals(42L, stats.totalBitmapPixels)
     }
 
+    @Test
+    fun ignoresNonPositiveImageAreas() {
+        val collector = AssPerformanceStatsCollector()
+
+        collector.record(
+            1_000_000,
+            AssFrame(arrayOf(testTex(0, 5), testTex(-2, 5), testTex(3, 4)), 1),
+        )
+
+        val stats = collector.snapshot()
+        assertEquals(12L, stats.maxBitmapPixels)
+        assertEquals(12L, stats.totalBitmapPixels)
+    }
+
     private fun testTex(width: Int, height: Int) =
         io.github.peerless2012.ass.AssTex(0, 0, width, height, 0)
 }
