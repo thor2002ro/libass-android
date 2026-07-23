@@ -1,0 +1,4420 @@
+diff --git a/.github/workflows/ghci.yml b/.github/workflows/ghci.yml
+index 6c1c182..d4bb180 100644
+--- a/.github/workflows/ghci.yml
++++ b/.github/workflows/ghci.yml
+@@ -9,7 +9,7 @@ jobs:
+   build:
+     runs-on: ${{ matrix.os }}
+     name: build(${{ matrix.msystem || matrix.docker_image || matrix.os }},
+-      ${{ matrix.cc }}${{ matrix.api && ', ' }}${{ matrix.api }}${{ matrix.jobname_suffix && ', ' }}${{ matrix.jobname_suffix }})
++      ${{ matrix.cc }}${{ matrix.jobname_suffix && ', ' }}${{ matrix.jobname_suffix }})
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -47,7 +47,7 @@ jobs:
+             # various regression test fail, assumed due to older deps
+             skip_tests: yes
+           # MacOS Intel
+-          - os: macos-13
++          - os: macos-15-intel
+             cc: clang
+           # MacOS arm64
+           - os: macos-14
+@@ -62,14 +62,10 @@ jobs:
+           - os: windows-latest
+             msystem: MINGW32
+             cc: gcc
+-            api: desktop
+             shell: 'msys2 {0}'
+-          # Add a best-effort build for UWP apps for Microsoft Store
+           - os: windows-latest
+             msystem: UCRT64
+             cc: gcc
+-            api: app
+-            extra_cflags: -DWINAPI_FAMILY=WINAPI_FAMILY_APP -specs=/tmp/windowsapp.specs
+             shell: 'msys2 {0}'
+ 
+     defaults:
+@@ -102,10 +98,10 @@ jobs:
+             output_stream.write(f"count={num_cpus}\n")
+ 
+       - name: checkout code
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+ 
+       - name: download test samples
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+         with:
+           repository: libass/libass-tests
+           path: ${{ env.ART_SAMPLES }}
+@@ -221,14 +217,6 @@ jobs:
+           echo "SANFLAGS=$flags"
+           echo "flags=${flags}" >> $GITHUB_OUTPUT
+ 
+-      - name: Customize compiler
+-        if: matrix.api == 'app' && matrix.cc == 'gcc'
+-        run: >
+-          gcc -dumpspecs
+-          | sed 's/-lmsvcrt/-lucrtapp/g; s/-lkernel32/-lwindowsapp/g;
+-          s/-ladvapi32//g; s/-lshell32//g; s/-luser32//g'
+-          > /tmp/windowsapp.specs
+-
+       - name: configure
+         run: |
+           export CC="${{ matrix.cc }}\
+diff --git a/.github/workflows/meson.yml b/.github/workflows/meson.yml
+index df1da09..472f931 100644
+--- a/.github/workflows/meson.yml
++++ b/.github/workflows/meson.yml
+@@ -15,8 +15,9 @@ jobs:
+       fail-fast: false
+       matrix:
+         config:
+-          - name: Windows (MSVC)
++          - name: Windows (MSVC x64)
+             os: windows-latest
++            arch: x64
+             msvc: true
+             shell: 'pwsh'
+             args: '-Ddefault_library=shared'
+@@ -30,6 +31,17 @@ jobs:
+             shell: 'msys2 {0}'
+             args: '-Ddefault_library=static -Db_sanitize=address,undefined'
+ 
++          - name: Windows (CLANGARM64)
++            os: windows-11-arm
++            msystem: CLANGARM64
++            args: '-Ddefault_library=shared'
++            shell: 'msys2 {0}'
++
++          - name: Windows (CLANGARM64)
++            os: windows-11-arm
++            msystem: CLANGARM64
++            shell: 'msys2 {0}'
++
+           - name: Windows (UCRT64)
+             os: windows-latest
+             msystem: UCRT64
+@@ -58,18 +70,17 @@ jobs:
+         shell: ${{ matrix.config.shell || 'bash' }}
+ 
+     env:
+-      VS: "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise"
+       ART_SAMPLES: ${{ github.workspace }}/ext_art-samples
+       SCCACHE_DIR: ${{ github.workspace }}/.sccache
+       SCCACHE_MAXSIZE: 200M
+ 
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v6
+         with:
+           fetch-depth: '0'
+ 
+       - name: Download test samples
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+         with:
+           repository: libass/libass-tests
+           path: ${{ env.ART_SAMPLES }}
+@@ -98,12 +109,21 @@ jobs:
+ 
+       - name: Restore cache
+         if: matrix.config.msvc
+-        uses: actions/cache/restore@v4
++        uses: actions/cache/restore@v5
+         with:
+           path: ${{ env.SCCACHE_DIR }}
+-          key: windows-msvc-${{ steps.get_time.outputs.timestamp }}
++          key: windows-msvc-${{ matrix.config.arch }}-${{ steps.get_time.outputs.timestamp }}
+           restore-keys: windows-msvc-
+ 
++      - name: Find Visual Studio
++        if: matrix.config.msvc
++        run: |
++          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
++          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
++          if (-not $vsPath) { throw "Could not find a Visual Studio installation" }
++          "VS=$vsPath"
++          "VS=$vsPath" >> $env:GITHUB_ENV
++
+       - name: Install MSVC dependecies with choco
+         if: matrix.config.msvc
+         # Install meson through pip to add it to PATH easily
+@@ -158,11 +178,11 @@ jobs:
+         run: cat build/meson-logs/testlog.txt
+ 
+       - name: Save Cache
+-        uses: actions/cache/save@v4
++        uses: actions/cache/save@v5
+         if: always() && matrix.config.msvc
+         with:
+           path: ${{ env.SCCACHE_DIR }}
+-          key: windows-msvc-${{ steps.get_time.outputs.timestamp }}
++          key: windows-msvc-${{ matrix.config.arch }}-${{ steps.get_time.outputs.timestamp }}
+ 
+   build-muon:
+     runs-on: ubuntu-latest
+@@ -188,7 +208,7 @@ jobs:
+                   fontconfig-dev libpng-dev git
+ 
+       - name: checkout code
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+ 
+       - name: configure
+         run: |
+@@ -250,7 +270,7 @@ jobs:
+                   libpng-dev meson ninja-build
+ 
+       - name: checkout code
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+ 
+       - name: setup distdir
+         run: |
+diff --git a/.github/workflows/qemu-arch.yml b/.github/workflows/qemu-arch.yml
+index 5e73f9a..4bb45f1 100644
+--- a/.github/workflows/qemu-arch.yml
++++ b/.github/workflows/qemu-arch.yml
+@@ -25,31 +25,22 @@ jobs:
+     #         (x32 is no longer supported in GHA kernels)
+     #         (amd64 and arm64 already covered in regular CI runners)
+     # Big:    s390x
+-    # Little: riscv64, mips64el
++    # Little: riscv64
+     strategy:
+       fail-fast: false
+       matrix:
+-        arch: [s390x, mips64el]
+-        suite: [bookworm]
++        arch: [i386, riscv64, s390x]
++        suite: [trixie]
+         chroot-rev: [1]
+         confopts: [""]
+-        cflags: [""]
+         include:
+           # i386 needs some SSE usage enabled to get a bit-identical result (even without ASM).
+           # This is due to different (higher) precision of 387 floating math (default for <=i686).
+           # SSE2 was introduced in 2000 by Intel and is present in both 32bit and 64bit
+           # CPUs from both AMD and Intel since 2003. Our ASM needs at least SSE2 anyway.
+           - arch: i386
+-            suite: bookworm
+-            # 24.04’s kernel doesn't enable all 32bit compat options leading to segfaults
+-            host_os: 'ubuntu-22.04'
+             cflags: '-msse -msse2 -mfpmath=sse'
+             sanity: sane?
+-            chroot-rev: 1
+-          - arch: riscv64
+-            suite: sid
+-            port: no
+-            chroot-rev: 1
+ 
+     steps:
+       - name: Prepare System
+@@ -131,7 +122,7 @@ jobs:
+       # use it to store our (compressed) chroot dirs
+       # (cache is branch scoped)
+       - name: Retrieve Cached Chroots
+-        uses: actions/cache@v4
++        uses: actions/cache@v5
+         id: cache
+         with:
+           path: /var/chroot/imgs
+@@ -223,12 +214,12 @@ jobs:
+ 
+ 
+       - name: Checkout libass
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+         with:
+           path: '${{ steps.config.outputs.chr_dir }}/home/artci/workarea/libass'
+ 
+       - name: Checkout tests
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+         with:
+           repository: ${{ github.event.inputs.test_repo || 'libass/libass-tests'}}
+           ref: ${{ github.event.inputs.test_ref }}
+diff --git a/.github/workflows/vm.yml b/.github/workflows/vm.yml
+index 036d12d..ad551fe 100644
+--- a/.github/workflows/vm.yml
++++ b/.github/workflows/vm.yml
+@@ -38,7 +38,7 @@ jobs:
+ 
+           - name: 'ART (freebsd64-qemu, FreeBSD-14, amd64)'
+             os_image: freebsd
+-            os_version: 14.2
++            os_version: 14.3
+             # The default FreeBSD env places the libiconv header from ports in the default include path,
+             # but doesn't put the corresponding library into the default library path.
+             # Either inlcuding the lib path (presumably done by ports) or
+@@ -51,40 +51,66 @@ jobs:
+ 
+           - name: 'ART (openbsd64-qemu, OpenBSD-7, amd64)'
+             os_image: openbsd
+-            os_version: 7.6
++            os_version: 7.8
+             CC: 'clang'
+             confflags: ''
+             ASAN_OPTIONS: ''
+             ART_REG_SKIP: 'font_nonunicode'
+             AUTOCONF_VERSION: '2.72'
+-            AUTOMAKE_VERSION: '1.16'
+-
+-          # No illumos in cross-platform-actions/action yet, see
+-          #   https://github.com/cross-platform-actions/action/issues/20
+-          #- name: 'ART (illumos32-qemu, OpenIndiana, i686)'
+-          #  vbox: openindiana/hipster
+-          #  CC: gcc -m32 -msse -msse2 -mfpmath=sse
+-          #  confflags: '--host=i686-pc-solaris2.11'
+-          #  ASAN_OPTIONS: ''
+-          #  ART_REG_SKIP: 'font_nonunicode'
++            AUTOMAKE_VERSION: '1.18'
++
++          - name: 'ART (haiku64-qemu, Haiku, amd64)'
++            os_image: haiku
++            os_version: r1beta5
++            # no libubsan available, thus just SIGILL
++            CC: 'gcc -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all -fsanitize-undefined-trap-on-error'
++
++          - name: 'ART(omnios64-qemu, illumos/OmniOS, amd64)'
++            os_image: omnios
++            os_version: r151056
++            # errors by default, but illumos has spec-incompliant iconv (const vs restrict)
++            CC: 'gcc -Wno-error=incompatible-pointer-types'
++            confenv: 'PKG_CONFIG_PATH=/opt/ooce/lib/64/pkgconfig'
++            ART_REG_SKIP: 'font_nonunicode'
++
+     env:
+       ASAN_OPTIONS: ${{ matrix.ASAN_OPTIONS }}
+       AUTOCONF_VERSION: ${{ matrix.AUTOCONF_VERSION }}
+       AUTOMAKE_VERSION: ${{ matrix.AUTOMAKE_VERSION }}
+ 
+     steps:
++      # Available core count changes on runner type and over time, but GHA
++      # doesn’t easily expose this, so we’ll have to query this ourselves. Based on:
++      # https://github.com/orgs/community/discussions/25057#discussioncomment-5957241
++      - name: determine logical cpu core count
++        id: cpus
++        shell: python
++        run: |
++          import os
++          import multiprocessing
++
++          try:
++            num_cpus = len(os.sched_getaffinity(0))
++          except AttributeError:
++            num_cpus = multiprocessing.cpu_count()
++          print(f"num_cpus={num_cpus}")
++
++          output_file = os.environ["GITHUB_OUTPUT"]
++          with open(output_file, "a", encoding="utf-8") as output_stream:
++            output_stream.write(f"count={num_cpus}\n")
++
+       - name: checkout libass
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+ 
+       - name: download test samples
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v6
+         with:
+           repository: ${{ github.event.inputs.test_repo || 'libass/libass-tests'}}
+           ref: ${{ github.event.inputs.test_ref }}
+           path: './libass-tests'
+ 
+       - name: Install Packages
+-        uses: cross-platform-actions/action@v0.28.0
++        uses: cross-platform-actions/action@v1.0.0
+         with:
+           operating_system: ${{ matrix.os_image }}
+           version: ${{ matrix.os_version }}
+@@ -112,33 +138,40 @@ jobs:
+               openbsd)
+                 # while OpenBSD natively uses doas,
+                 # cross-platform-action only preconfigured sudo.
+-                # Using system-provided: compiler, fontconfig, freetype
++                # Using system-provided: compiler, fontconfig, freetype, pkgconf
+                 sudo pkg_add \
+-                  git nasm libtool pkgconf \
++                  git nasm libtool \
+                   autoconf-"$AUTOCONF_VERSION"p0 \
+-                  automake-"$AUTOMAKE_VERSION".5 \
++                  automake-"$AUTOMAKE_VERSION" \
+                   fribidi harfbuzz libunibreak png
+                 ;;
+-              openindiana/*)
+-                pfexec pkg install --no-backup-be \
+-                    crypto/ca-certificates \
+-                    developer/versioning/git \
+-                    developer/gcc-10 \
+-                    developer/assembler/nasm \
+-                    developer/build/autoconf \
+-                    developer/build/automake \
+-                    developer/build/libtool \
+-                    developer/build/pkg-config \
+-                    system/library/freetype-2 \
+-                    library/fribidi \
+-                    library/c++/harfbuzz \
+-                    system/library/fontconfig \
+-                    image/library/libpng
++              haiku)
++                pkgman install -y \
++                  git nasm gcc make pkgconfig \
++                  libtool autoconf automake \
++                  freetype_devel fribidi_devel harfbuzz_devel \
++                  fontconfig_devel libunibreak_devel libpng16_devel
++                ;;
++              omnios)
++                # "ooce" extra packages are not in regular search paths.
++                # Activate via /opt/ooce/lib/64/pkgconfig etc.
++                # Harfbuzz and fribidi are bundled with pango (no standalone package).
++                sudo pkg install --deny-new-be --no-backup-be \
++                  pkg:/developer/gcc14 \
++                  pkg:/developer/nasm \
++                  pkg:/developer/build/make \
++                  pkg:/developer/pkg-config \
++                  pkg:/developer/build/autoconf \
++                  pkg:/developer/build/automake \
++                  pkg:/developer/build/libtool \
++                  pkg:/ooce/library/fontconfig \
++                  pkg:/ooce/library/pango \
++                  pkg:/ooce/library/libpng
+                 ;;
+             esac
+ 
+       - name: Build libass
+-        uses: cross-platform-actions/action@v0.28.0
++        uses: cross-platform-actions/action@v1.0.0
+         with:
+           operating_system: ${{ matrix.os_image }}
+           version: ${{ matrix.os_version }}
+@@ -147,11 +180,12 @@ jobs:
+           sync_files: true
+           run: |
+             ./autogen.sh
+-            ./configure CC="${{ matrix.CC }}" ${{ matrix.confflags }} --enable-fuzz --enable-compare
+-            make -j 2
++            env ${{ matrix.confenv }} \
++              ./configure CC="${{ matrix.CC }}" ${{ matrix.confflags }} --enable-fuzz --enable-compare
++            make -j '${{ steps.cpus.outputs.count }}'
+ 
+       - name: Run Tests
+-        uses: cross-platform-actions/action@v0.28.0
++        uses: cross-platform-actions/action@v1.0.0
+         with:
+           operating_system: ${{ matrix.os_image }}
+           version: ${{ matrix.os_version }}
+@@ -165,7 +199,7 @@ jobs:
+ 
+       - name: Shutdown VM
+         if: always()
+-        uses: cross-platform-actions/action@v0.28.0
++        uses: cross-platform-actions/action@v1.0.0
+         with:
+           operating_system: ${{ matrix.os_image }}
+           version: ${{ matrix.os_version }}
+diff --git a/Changelog b/Changelog
+index 66e8083..2b77a40 100644
+--- a/Changelog
++++ b/Changelog
+@@ -1,3 +1,15 @@
++libass (0.17.5)
++ * Fix limited OOB read and write in wrap_lines_measure (GHSA-pjjp-65r7-ppgm; CVE-2026-61627)
++ * Fix OOB bit clears for negative Matroska ReadOrder fields (GHSA-5gf7-wjfm-vmvm; CVE-2026-61626)
++ * Fix \fay with glyph clusters
++ * Fix small alpha changes not always splitting runs when combined with fade
++ * Fix compilation with MSVC-mode clang
++ * Fades are now applied to BorderStyle=4 boxes too
++ * Fonts using legacy arabic Windows charmaps are now supported
++ * ass_render_frame no longer returns fully transparent images
++ * Avoid MSVC’s subpar code generation for isnan to bring performance closer to other compilers
++ * Avoid SSE instructions if compiler baseline already includes AVX
++
+ libass (0.17.4)
+  * add new API to prune old events from memory
+    * ass_prune_events for manual pruning
+diff --git a/Makefile.am b/Makefile.am
+index 208f860..2287369 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -15,6 +15,11 @@ AM_CFLAGS = -std=gnu99 -D_GNU_SOURCE -D_XPLATFORM_SOURCE
+ 
+ EXTRA_DIST = libass.pc.in Changelog MAINTAINERS RELEASEVERSION ltnasm.sh
+ 
++# Source of pre-generated C files
++EXTRA_DIST += legacy_arabic_cmap/ArabicPUASimplified.txt \
++              legacy_arabic_cmap/ArabicPUATraditional.txt \
++              legacy_arabic_cmap/gen_arabic_charmap.py
++
+ # Meson build setup
+ EXTRA_DIST += gen_defs.py meson_options.txt meson.build \
+               libass/meson.build libass/ass/meson.build \
+diff --git a/Makefile_util.am b/Makefile_util.am
+index c2cd1c1..cf863fa 100644
+--- a/Makefile_util.am
++++ b/Makefile_util.am
+@@ -52,6 +52,7 @@ endif
+ checkasm_checkasm_SOURCES = \
+     checkasm/rasterizer.c \
+     checkasm/blend_bitmaps.c \
++    checkasm/shift.c \
+     checkasm/be_blur.c \
+     checkasm/blur.c \
+     checkasm/checkasm.h checkasm/checkasm.c \
+diff --git a/README.md b/README.md
+index f3715c3..889bb6e 100644
+--- a/README.md
++++ b/README.md
+@@ -4,7 +4,7 @@ libass is a portable subtitle renderer for the ASS/SSA (Advanced Substation Alph
+ 
+ Get it
+ ======
+-See [GitHub releases](https://github.com/libass/libass/releases) for the latest release 0.17.4 (released 2025-06-07).
++See [GitHub releases](https://github.com/libass/libass/releases) for the latest release 0.17.5 (released 2026-06-24).
+ See the [changelog](https://github.com/libass/libass/blob/master/Changelog) for a detailed list of changes.
+ 
+ Source code is available from our [GitHub repository](https://github.com/libass/libass).
+diff --git a/RELEASEVERSION b/RELEASEVERSION
+index 44e33a4..8b5334d 100644
+--- a/RELEASEVERSION
++++ b/RELEASEVERSION
+@@ -1 +1 @@
+-0.17.4
++0.17.5
+diff --git a/checkasm/checkasm.c b/checkasm/checkasm.c
+index 857938b..0ddd74d 100644
+--- a/checkasm/checkasm.c
++++ b/checkasm/checkasm.c
+@@ -59,6 +59,7 @@ static const struct {
+ } tests[] = {
+     { "rasterizer", checkasm_check_rasterizer },
+     { "blend_bitmaps", checkasm_check_blend_bitmaps },
++    { "shift", checkasm_check_shift },
+     { "be_blur", checkasm_check_be_blur },
+     { "blur", checkasm_check_blur },
+     { 0 }
+diff --git a/checkasm/checkasm.h b/checkasm/checkasm.h
+index 3cd7c24..9413019 100644
+--- a/checkasm/checkasm.h
++++ b/checkasm/checkasm.h
+@@ -61,6 +61,7 @@ int xor128_rand(void);
+ 
+ void checkasm_check_rasterizer(unsigned cpu_flag);
+ void checkasm_check_blend_bitmaps(unsigned cpu_flag);
++void checkasm_check_shift(unsigned cpu_flag);
+ void checkasm_check_be_blur(unsigned cpu_flag);
+ void checkasm_check_blur(unsigned cpu_flag);
+ 
+diff --git a/checkasm/meson.build b/checkasm/meson.build
+index e9a79d0..5a27ce2 100644
+--- a/checkasm/meson.build
++++ b/checkasm/meson.build
+@@ -2,6 +2,7 @@ checkasm_src = files(
+     'checkasm.c',
+     'rasterizer.c',
+     'blend_bitmaps.c',
++    'shift.c',
+     'be_blur.c',
+     'blur.c',
+ )
+@@ -27,6 +28,7 @@ libass_checkasm = executable(
+     include_directories: incs,
+     dependencies: deps,
+     objects: libass.extract_all_objects(recursive: true),
++    link_with: libass_link_with,
+     c_args: asm_args,
+     build_by_default: false,
+ )
+diff --git a/checkasm/shift.c b/checkasm/shift.c
+new file mode 100644
+index 0000000..9dca4ec
+--- /dev/null
++++ b/checkasm/shift.c
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (C) 2026 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "ass_compat.h"
++
++#include "checkasm.h"
++
++#include <string.h>
++
++#define HEIGHT 8
++#define STRIDE 64
++#define MIN_WIDTH 2
++#define REP_COUNT 8
++
++static void check_shift(ShiftFunc func)
++{
++    ALIGN(uint8_t buf_ref[STRIDE * HEIGHT], 32);
++    ALIGN(uint8_t buf_new[STRIDE * HEIGHT], 32);
++    declare_func(void,
++                 uint8_t *buf, ptrdiff_t stride,
++                 size_t width, size_t height,
++                 int shift_x, int shift_y);
++
++    if (check_func(func, "shift")) {
++        for (int w = MIN_WIDTH; w <= STRIDE; w++) {
++            for(int rep = 0; rep < REP_COUNT; rep++) {
++                memset(buf_ref, 0, sizeof(buf_ref));
++                memset(buf_new, 0, sizeof(buf_new));
++                for (int y = 0; y < HEIGHT; y++) {
++                    for (int x = 0; x < w; x++)
++                        buf_ref[y * STRIDE + x] = buf_new[y * STRIDE + x] = rnd();
++                }
++
++                int shift_x = rnd() & 63;
++                int shift_y = rnd() & 63;
++
++                call_ref(buf_ref, STRIDE, w, HEIGHT, shift_x, shift_y);
++                call_new(buf_new, STRIDE, w, HEIGHT, shift_x, shift_y);
++
++                if (memcmp(buf_ref, buf_new, sizeof(buf_ref))) {
++                    fail();
++                    break;
++                }
++            }
++        }
++
++        bench_new(buf_new, STRIDE, STRIDE, HEIGHT, 42, 13);
++    }
++
++    report("shift");
++}
++
++void checkasm_check_shift(unsigned cpu_flag)
++{
++    BitmapEngine engine = ass_bitmap_engine_init(cpu_flag);
++    check_shift(engine.shift);
++}
+diff --git a/compare/meson.build b/compare/meson.build
+index b3edafc..4fbf90c 100644
+--- a/compare/meson.build
++++ b/compare/meson.build
+@@ -10,6 +10,7 @@ libass_compare = executable(
+     include_directories: incs,
+     dependencies: deps + png_deps,
+     objects: libass.extract_all_objects(recursive: true),
++    link_with: libass_link_with,
+ )
+ 
+ art_samples = get_option('art-samples')
+diff --git a/configure.ac b/configure.ac
+index afd6350..50085c4 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -16,7 +16,7 @@ AM_PROG_AS
+ AC_CHECK_HEADERS_ONCE([iconv.h])
+ 
+ # Checks for library functions.
+-AC_CHECK_FUNCS([strdup strndup])
++AC_CHECK_FUNCS([strdup strndup strchrnul])
+ 
+ # Query configuration parameters and set their description
+ AC_ARG_ENABLE([test], AS_HELP_STRING([--enable-test],
+@@ -325,6 +325,13 @@ AS_IF([test "x$enable_asm" != xno], [
+                         ))
+                     ]
+                 )
++
++                # Convert SSE asm into (128-bit) AVX when compiler baseline is set to use AVX.
++                # Switching between AVX and SSE instructions can incur penalties.
++                AC_CHECK_DECL([__AVX__], [
++                    ASFLAGS="$ASFLAGS -DFORCE_VEX_ENCODING=1"
++                ])
++
+                 AC_MSG_CHECKING([if $AS supports vpmovzxwd])
+                 echo "vpmovzxwd ymm0, xmm0" > conftest.asm
+                 AS_IF([$AS conftest.asm $ASFLAGS -o conftest.o >conftest.log 2>&1], [
+diff --git a/fuzz/fuzz.c b/fuzz/fuzz.c
+index 19b3432..db9e105 100644
+--- a/fuzz/fuzz.c
++++ b/fuzz/fuzz.c
+@@ -47,6 +47,9 @@
+     #define LEN_IN_RANGE(s) true
+ #endif
+ 
++#define STR_(x) #x
++#define STR(x) STR_(x)
++
+ // MSAN: will trigger MSAN if any pixel in bitmap not written to (costly)
+ #ifndef ASSFUZZ_HASH_WHOLEBITMAP
+     #define ASSFUZZ_HASH_WHOLEBITMAP 0
+@@ -356,6 +359,10 @@ int main(int argc, char *argv[])
+     ssize_t len;
+     unsigned char *buf;
+ 
++#ifdef ASSFUZZ_FONTCONFIG_SYSROOT
++    setenv("FONTCONFIG_SYSROOT", STR(ASSFUZZ_FONTCONFIG_SYSROOT), 1);
++#endif
++
+     if (!init()) {
+         printf("library init failed!\n");
+         return 1;
+@@ -390,6 +397,14 @@ int main(int argc, char *argv[])
+     return 0;
+ }
+ #elif ASS_FUZZMODE == FUZZMODE_LIBFUZZER
++int LLVMFuzzerInitialize(int *argc, char ***argv)
++{
++#ifdef ASSFUZZ_FONTCONFIG_SYSROOT
++    setenv("FONTCONFIG_SYSROOT", STR(ASSFUZZ_FONTCONFIG_SYSROOT), 1);
++#endif
++    return 0;
++}
++
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+     // OSS Fuzz docs recommend just returning 0 on too large input
+@@ -402,9 +417,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ 
+     ASS_Track *track = NULL;
+ 
+-    // All return values but zero and -1 are reserved
+     if (!init())
+-        return 0;
++        exit(1);
+ 
+     track = ass_read_memory(ass_library, (char *)data, size, NULL);
+     if (track) {
+diff --git a/fuzz/meson.build b/fuzz/meson.build
+index 6d87e58..0cd01e8 100644
+--- a/fuzz/meson.build
++++ b/fuzz/meson.build
+@@ -3,6 +3,8 @@ fuzz_src = files(
+     'writeout.c',
+ )
+ 
++add_languages(get_option('fuzz-link-language'), native: false)
++
+ libass_fuzz = executable(
+     'fuzz',
+     fuzz_src,
+diff --git a/fuzz/writeout.c b/fuzz/writeout.c
+index b6dd0ce..3981e59 100644
+--- a/fuzz/writeout.c
++++ b/fuzz/writeout.c
+@@ -138,8 +138,9 @@ static void write_styles(FILE *f, ASS_Track *track)
+                    "%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%d,%d,%d,%d,%d\n",
+             s->Name, s->FontName, s->FontSize, s->PrimaryColour, s->SecondaryColour,
+             s->OutlineColour, s->BackColour, s->Bold, s->Italic, s->Underline, s->StrikeOut,
+-            s->ScaleX, s->ScaleY, s->Spacing, s->Angle, s->BorderStyle, s->Outline, s->Shadow,
+-            ssa2ass_align(s->Alignment), s->MarginL, s->MarginR, s->MarginV, s->Encoding);
++            s->ScaleX * 100, s->ScaleY * 100, s->Spacing, s->Angle, s->BorderStyle,
++            s->Outline, s->Shadow, ssa2ass_align(s->Alignment),
++            s->MarginL, s->MarginR, s->MarginV, s->Encoding);
+     }
+ }
+ 
+@@ -163,8 +164,11 @@ static void write_events(FILE *f, ASS_Track *track)
+             continue;
+         }
+         fprintf(f, "Dialogue: %d,%s,%s,%s,%s,%03d,%03d,%03d,%s,%s\n",
+-            e->Layer, start, end, (track->styles + e->Style)->Name, e->Name,
+-            e->MarginL, e->MarginR, e->MarginV, e->Effect, e->Text);
++            e->Layer, start, end, (track->styles + e->Style)->Name,
++            e->Name ? e->Name : "",
++            e->MarginL, e->MarginR, e->MarginV,
++            e->Effect ? e->Effect : "",
++            e->Text);
+     }
+ }
+ 
+diff --git a/legacy_arabic_cmap/ArabicPUASimplified.txt b/legacy_arabic_cmap/ArabicPUASimplified.txt
+new file mode 100644
+index 0000000..a74ef26
+--- /dev/null
++++ b/legacy_arabic_cmap/ArabicPUASimplified.txt
+@@ -0,0 +1,250 @@
++#
++#    Name:     Legacy Simplified Arabic encoding
++#
++#    Format: Three tab-separated columns
++#        Column #1 is the PUA code (in hex as 0xXXXX)
++#        Column #2 is the Unicode (in hex as 0xXXXX)
++#        Column #3 is the Unicode name (follows a comment sign, '#')
++#
++#    The entries are in PUA order
++#
++0xF100	0x063B	# ARABIC LETTER KEHEH WITH TWO DOTS ABOVE
++0xF100	0x063C	# ARABIC LETTER KEHEH WITH THREE DOTS BELOW
++0xF100	0x063D	# ARABIC LETTER FARSI YEH WITH INVERTED V
++0xF100	0x063E	# ARABIC LETTER FARSI YEH WITH TWO DOTS ABOVE
++0xF100	0x063F	# ARABIC LETTER FARSI YEH WITH THREE DOTS ABOVE
++0xF100	0x0653	# ARABIC MADDAH ABOVE
++0xF100	0x0654	# ARABIC HAMZA ABOVE
++0xF100	0x0655	# ARABIC HAMZA BELOW
++0xF100	0x0656	# ARABIC SUBSCRIPT ALEF
++0xF100	0x0657	# ARABIC INVERTED DAMMA
++0xF100	0x0658	# ARABIC MARK NOON GHUNNA
++0xF100	0x0659	# ARABIC ZWARAKAY
++0xF100	0x065A	# ARABIC VOWEL SIGN SMALL V ABOVE
++0xF100	0x065B	# ARABIC VOWEL SIGN INVERTED SMALL V ABOVE
++0xF100	0x065C	# ARABIC VOWEL SIGN DOT BELOW
++0xF100	0x065D	# ARABIC REVERSED DAMMA
++0xF100	0x065E	# ARABIC FATHA WITH TWO DOTS
++0xF10C	0x200C	# ZERO WIDTH NON-JOINER
++0xF10D	0x200D	# ZERO WIDTH JOINER
++0xF10E	0x200E	# LEFT-TO-RIGHT MARK
++0xF10F	0x200F	# RIGHT-TO-LEFT MARK
++0xF120	0x0020	# SPACE
++0xF121	0x0021	# EXCLAMATION MARK
++0xF122	0x0022	# QUOTATION MARK
++0xF123	0x00AB	# LEFT-POINTING DOUBLE ANGLE QUOTATION MARK
++0xF124	0x00BB	# RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK
++0xF125	0x0025	# PERCENT SIGN
++0xF126	0x00D7	# MULTIPLICATION SIGN
++0xF127	0x00F7	# DIVISION SIGN
++0xF128	0x0028	# LEFT PARENTHESIS
++0xF129	0x0029	# RIGHT PARENTHESIS
++0xF12A	0x002A	# ASTERISK
++0xF12B	0x002B	# PLUS SIGN
++0xF12C	0x060C	# ARABIC COMMA
++0xF12D	0x002D	# HYPHEN-MINUS
++0xF12E	0x002E	# FULL STOP
++0xF12F	0x002F	# SOLIDUS
++0xF130	0x0660	# ARABIC-INDIC DIGIT ZERO
++0xF131	0x0661	# ARABIC-INDIC DIGIT ONE
++0xF132	0x0662	# ARABIC-INDIC DIGIT TWO
++0xF133	0x0663	# ARABIC-INDIC DIGIT THREE
++0xF134	0x0664	# ARABIC-INDIC DIGIT FOUR
++0xF135	0x0665	# ARABIC-INDIC DIGIT FIVE
++0xF136	0x0666	# ARABIC-INDIC DIGIT SIX
++0xF137	0x0667	# ARABIC-INDIC DIGIT SEVEN
++0xF138	0x0668	# ARABIC-INDIC DIGIT EIGHT
++0xF139	0x0669	# ARABIC-INDIC DIGIT NINE
++0xF13A	0x003A	# COLON
++0xF13B	0x003B	# SEMICOLON
++0xF13B	0x061B	# ARABIC SEMICOLON
++0xF13C	0x2018	# LEFT SINGLE QUOTATION MARK
++0xF13D	0x003D	# EQUALS SIGN
++0xF13E	0x2019	# RIGHT SINGLE QUOTATION MARK
++0xF13F	0x003F	# QUESTION MARK
++0xF13F	0x061F	# ARABIC QUESTION MARK
++0xF141	0x0627	# ARABIC LETTER ALEF
++0xF141	0xFE8D	# ARABIC LETTER ALEF ISOLATED FORM
++0xF142	0xFE8E	# ARABIC LETTER ALEF FINAL FORM
++0xF143	0x0623	# ARABIC LETTER ALEF WITH HAMZA ABOVE
++0xF143	0xFE83	# ARABIC LETTER ALEF WITH HAMZA ABOVE ISOLATED FORM
++0xF144	0xFE84	# ARABIC LETTER ALEF WITH HAMZA ABOVE FINAL FORM
++0xF145	0x0622	# ARABIC LETTER ALEF WITH MADDA ABOVE
++0xF145	0xFE81	# ARABIC LETTER ALEF WITH MADDA ABOVE ISOLATED FORM
++0xF146	0xFE82	# ARABIC LETTER ALEF WITH MADDA ABOVE FINAL FORM
++0xF147	0x0625	# ARABIC LETTER ALEF WITH HAMZA BELOW
++0xF147	0xFE87	# ARABIC LETTER ALEF WITH HAMZA BELOW ISOLATED FORM
++0xF148	0xFE88	# ARABIC LETTER ALEF WITH HAMZA BELOW FINAL FORM
++0xF149	0xFE91	# ARABIC LETTER BEH INITIAL FORM
++0xF149	0xFE92	# ARABIC LETTER BEH MEDIAL FORM
++0xF14A	0x0628	# ARABIC LETTER BEH
++0xF14A	0xFE8F	# ARABIC LETTER BEH ISOLATED FORM
++0xF14A	0xFE90	# ARABIC LETTER BEH FINAL FORM
++0xF14B	0xFE97	# ARABIC LETTER TEH INITIAL FORM
++0xF14B	0xFE98	# ARABIC LETTER TEH MEDIAL FORM
++0xF14C	0x062A	# ARABIC LETTER TEH
++0xF14C	0xFE95	# ARABIC LETTER TEH ISOLATED FORM
++0xF14C	0xFE96	# ARABIC LETTER TEH FINAL FORM
++0xF14D	0xFE9B	# ARABIC LETTER THEH INITIAL FORM
++0xF14D	0xFE9C	# ARABIC LETTER THEH MEDIAL FORM
++0xF14E	0x062B	# ARABIC LETTER THEH
++0xF14E	0xFE99	# ARABIC LETTER THEH ISOLATED FORM
++0xF14E	0xFE9A	# ARABIC LETTER THEH FINAL FORM
++0xF14F	0xFE9F	# ARABIC LETTER JEEM INITIAL FORM
++0xF14F	0xFEA0	# ARABIC LETTER JEEM MEDIAL FORM
++0xF150	0xFE9E	# ARABIC LETTER JEEM FINAL FORM
++0xF151	0x062C	# ARABIC LETTER JEEM
++0xF151	0xFE9D	# ARABIC LETTER JEEM ISOLATED FORM
++0xF152	0xFEA3	# ARABIC LETTER HAH INITIAL FORM
++0xF152	0xFEA4	# ARABIC LETTER HAH MEDIAL FORM
++0xF153	0xFEA2	# ARABIC LETTER HAH FINAL FORM
++0xF154	0x062D	# ARABIC LETTER HAH
++0xF154	0xFEA1	# ARABIC LETTER HAH ISOLATED FORM
++0xF155	0xFEA7	# ARABIC LETTER KHAH INITIAL FORM
++0xF155	0xFEA8	# ARABIC LETTER KHAH MEDIAL FORM
++0xF156	0xFEA6	# ARABIC LETTER KHAH FINAL FORM
++0xF157	0x062E	# ARABIC LETTER KHAH
++0xF157	0xFEA5	# ARABIC LETTER KHAH ISOLATED FORM
++0xF158	0x062F	# ARABIC LETTER DAL
++0xF158	0xFEA9	# ARABIC LETTER DAL ISOLATED FORM
++0xF158	0xFEAA	# ARABIC LETTER DAL FINAL FORM
++0xF159	0x0630	# ARABIC LETTER THAL
++0xF159	0xFEAB	# ARABIC LETTER THAL ISOLATED FORM
++0xF159	0xFEAC	# ARABIC LETTER THAL FINAL FORM
++0xF15A	0x0631	# ARABIC LETTER REH
++0xF15A	0xFEAD	# ARABIC LETTER REH ISOLATED FORM
++0xF15A	0xFEAE	# ARABIC LETTER REH FINAL FORM
++0xF15B	0x005B	# LEFT SQUARE BRACKET
++0xF15C	0x005C	# REVERSE SOLIDUS
++0xF15D	0x005D	# RIGHT SQUARE BRACKET
++0xF15E	0x002C	# COMMA
++0xF15E	0x066B	# ARABIC DECIMAL SEPARATOR
++0xF15E	0x066C	# ARABIC THOUSANDS SEPARATOR
++0xF15F	0x0640	# ARABIC TATWEEL
++0xF160	0x0632	# ARABIC LETTER ZAIN
++0xF160	0xFEAF	# ARABIC LETTER ZAIN ISOLATED FORM
++0xF160	0xFEB0	# ARABIC LETTER ZAIN FINAL FORM
++0xF161	0xFEB3	# ARABIC LETTER SEEN INITIAL FORM
++0xF161	0xFEB4	# ARABIC LETTER SEEN MEDIAL FORM
++0xF162	0x0633	# ARABIC LETTER SEEN
++0xF162	0xFEB1	# ARABIC LETTER SEEN ISOLATED FORM
++0xF162	0xFEB2	# ARABIC LETTER SEEN FINAL FORM
++0xF163	0xFEB7	# ARABIC LETTER SHEEN INITIAL FORM
++0xF163	0xFEB8	# ARABIC LETTER SHEEN MEDIAL FORM
++0xF164	0x0634	# ARABIC LETTER SHEEN
++0xF164	0xFEB5	# ARABIC LETTER SHEEN ISOLATED FORM
++0xF164	0xFEB6	# ARABIC LETTER SHEEN FINAL FORM
++0xF165	0xFEBB	# ARABIC LETTER SAD INITIAL FORM
++0xF165	0xFEBC	# ARABIC LETTER SAD MEDIAL FORM
++0xF166	0x0635	# ARABIC LETTER SAD
++0xF166	0xFEB9	# ARABIC LETTER SAD ISOLATED FORM
++0xF166	0xFEBA	# ARABIC LETTER SAD FINAL FORM
++0xF167	0xFEBF	# ARABIC LETTER DAD INITIAL FORM
++0xF167	0xFEC0	# ARABIC LETTER DAD MEDIAL FORM
++0xF168	0x0636	# ARABIC LETTER DAD
++0xF168	0xFEBD	# ARABIC LETTER DAD ISOLATED FORM
++0xF168	0xFEBE	# ARABIC LETTER DAD FINAL FORM
++0xF169	0x0637	# ARABIC LETTER TAH
++0xF169	0xFEC1	# ARABIC LETTER TAH ISOLATED FORM
++0xF169	0xFEC2	# ARABIC LETTER TAH FINAL FORM
++0xF169	0xFEC3	# ARABIC LETTER TAH INITIAL FORM
++0xF169	0xFEC4	# ARABIC LETTER TAH MEDIAL FORM
++0xF16A	0x0638	# ARABIC LETTER ZAH
++0xF16A	0xFEC5	# ARABIC LETTER ZAH ISOLATED FORM
++0xF16A	0xFEC6	# ARABIC LETTER ZAH FINAL FORM
++0xF16A	0xFEC7	# ARABIC LETTER ZAH INITIAL FORM
++0xF16A	0xFEC8	# ARABIC LETTER ZAH MEDIAL FORM
++0xF16B	0xFECB	# ARABIC LETTER AIN INITIAL FORM
++0xF16C	0xFECC	# ARABIC LETTER AIN MEDIAL FORM
++0xF16D	0xFECA	# ARABIC LETTER AIN FINAL FORM
++0xF16E	0x0639	# ARABIC LETTER AIN
++0xF16E	0xFEC9	# ARABIC LETTER AIN ISOLATED FORM
++0xF16F	0xFECF	# ARABIC LETTER GHAIN INITIAL FORM
++0xF170	0xFED0	# ARABIC LETTER GHAIN MEDIAL FORM
++0xF171	0xFECE	# ARABIC LETTER GHAIN FINAL FORM
++0xF172	0x063A	# ARABIC LETTER GHAIN
++0xF172	0xFECD	# ARABIC LETTER GHAIN ISOLATED FORM
++0xF173	0xFED3	# ARABIC LETTER FEH INITIAL FORM
++0xF174	0xFED4	# ARABIC LETTER FEH MEDIAL FORM
++0xF175	0x0641	# ARABIC LETTER FEH
++0xF175	0xFED1	# ARABIC LETTER FEH ISOLATED FORM
++0xF175	0xFED2	# ARABIC LETTER FEH FINAL FORM
++0xF176	0xFED7	# ARABIC LETTER QAF INITIAL FORM
++0xF177	0xFED8	# ARABIC LETTER QAF MEDIAL FORM
++0xF178	0x0642	# ARABIC LETTER QAF
++0xF178	0xFED5	# ARABIC LETTER QAF ISOLATED FORM
++0xF178	0xFED6	# ARABIC LETTER QAF FINAL FORM
++0xF179	0xFEDB	# ARABIC LETTER KAF INITIAL FORM
++0xF179	0xFEDC	# ARABIC LETTER KAF MEDIAL FORM
++0xF17A	0x0643	# ARABIC LETTER KAF
++0xF17A	0xFED9	# ARABIC LETTER KAF ISOLATED FORM
++0xF17A	0xFEDA	# ARABIC LETTER KAF FINAL FORM
++0xF17B	0xFEDF	# ARABIC LETTER LAM INITIAL FORM
++0xF17B	0xFEE0	# ARABIC LETTER LAM MEDIAL FORM
++0xF17C	0x0644	# ARABIC LETTER LAM
++0xF17C	0xFEDD	# ARABIC LETTER LAM ISOLATED FORM
++0xF17C	0xFEDE	# ARABIC LETTER LAM FINAL FORM
++0xF17D	0xFEE3	# ARABIC LETTER MEEM INITIAL FORM
++0xF17D	0xFEE4	# ARABIC LETTER MEEM MEDIAL FORM
++0xF17E	0x0645	# ARABIC LETTER MEEM
++0xF17E	0xFEE1	# ARABIC LETTER MEEM ISOLATED FORM
++0xF17E	0xFEE2	# ARABIC LETTER MEEM FINAL FORM
++0xF17F	0xFEE7	# ARABIC LETTER NOON INITIAL FORM
++0xF17F	0xFEE8	# ARABIC LETTER NOON MEDIAL FORM
++0xF1A1	0xFEEB	# ARABIC LETTER HEH INITIAL FORM
++0xF1A2	0xFEEC	# ARABIC LETTER HEH MEDIAL FORM
++0xF1A3	0xFEEA	# ARABIC LETTER HEH FINAL FORM
++0xF1A4	0x0647	# ARABIC LETTER HEH
++0xF1A4	0xFEE9	# ARABIC LETTER HEH ISOLATED FORM
++0xF1A5	0x0648	# ARABIC LETTER WAW
++0xF1A5	0xFEED	# ARABIC LETTER WAW ISOLATED FORM
++0xF1A5	0xFEEE	# ARABIC LETTER WAW FINAL FORM
++0xF1A6	0xFEF3	# ARABIC LETTER YEH INITIAL FORM
++0xF1A6	0xFEF4	# ARABIC LETTER YEH MEDIAL FORM
++0xF1A7	0xFEF2	# ARABIC LETTER YEH FINAL FORM
++0xF1A8	0x064A	# ARABIC LETTER YEH
++0xF1A8	0xFEF1	# ARABIC LETTER YEH ISOLATED FORM
++0xF1A9	0x0629	# ARABIC LETTER TEH MARBUTA
++0xF1A9	0xFE93	# ARABIC LETTER TEH MARBUTA ISOLATED FORM
++0xF1AA	0xFE94	# ARABIC LETTER TEH MARBUTA FINAL FORM
++0xF1AB	0xFEF0	# ARABIC LETTER ALEF MAKSURA FINAL FORM
++0xF1AC	0x0649	# ARABIC LETTER ALEF MAKSURA
++0xF1AC	0xFEEF	# ARABIC LETTER ALEF MAKSURA ISOLATED FORM
++0xF1AD	0x0621	# ARABIC LETTER HAMZA
++0xF1AE	0xFE8B	# ARABIC LETTER YEH WITH HAMZA ABOVE INITIAL FORM
++0xF1AE	0xFE8C	# ARABIC LETTER YEH WITH HAMZA ABOVE MEDIAL FORM
++0xF1AF	0xFE8A	# ARABIC LETTER YEH WITH HAMZA ABOVE FINAL FORM
++0xF1B0	0x0030	# DIGIT ZERO
++0xF1B1	0x0031	# DIGIT ONE
++0xF1B2	0x0032	# DIGIT TWO
++0xF1B3	0x0033	# DIGIT THREE
++0xF1B4	0x0034	# DIGIT FOUR
++0xF1B5	0x0035	# DIGIT FIVE
++0xF1B6	0x0036	# DIGIT SIX
++0xF1B7	0x0037	# DIGIT SEVEN
++0xF1B8	0x0038	# DIGIT EIGHT
++0xF1B9	0x0039	# DIGIT NINE
++0xF1BA	0x0626	# ARABIC LETTER YEH WITH HAMZA ABOVE
++0xF1BA	0xFE89	# ARABIC LETTER YEH WITH HAMZA ABOVE ISOLATED FORM
++0xF1BB	0x0624	# ARABIC LETTER WAW WITH HAMZA ABOVE
++0xF1BB	0xFE85	# ARABIC LETTER WAW WITH HAMZA ABOVE ISOLATED FORM
++0xF1BB	0xFE86	# ARABIC LETTER WAW WITH HAMZA ABOVE FINAL FORM
++0xF1BC	0xFEFC	# ARABIC LIGATURE LAM WITH ALEF FINAL FORM
++0xF1BD	0xFEFB	# ARABIC LIGATURE LAM WITH ALEF ISOLATED FORM
++0xF1BE	0xFEF7	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA ABOVE ISOLATED FORM
++0xF1BF	0xFEF8	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA ABOVE FINAL FORM
++0xF1C0	0xFEF5	# ARABIC LIGATURE LAM WITH ALEF WITH MADDA ABOVE ISOLATED FORM
++0xF1C1	0xFEF6	# ARABIC LIGATURE LAM WITH ALEF WITH MADDA ABOVE FINAL FORM
++0xF1C2	0xFEF9	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA BELOW ISOLATED FORM
++0xF1C3	0xFEFA	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA BELOW FINAL FORM
++0xF1C4	0x064E	# ARABIC FATHA
++0xF1C5	0x064F	# ARABIC DAMMA
++0xF1C6	0x0652	# ARABIC SUKUN
++0xF1C7	0x064B	# ARABIC FATHATAN
++0xF1C8	0x064C	# ARABIC DAMMATAN
++0xF1C9	0x0651	# ARABIC SHADDA
++0xF1CA	0x0650	# ARABIC KASRA
++0xF1CB	0x064D	# ARABIC KASRATAN
++0xF1E1	0x0646	# ARABIC LETTER NOON
++0xF1E1	0xFEE5	# ARABIC LETTER NOON ISOLATED FORM
++0xF1E1	0xFEE6	# ARABIC LETTER NOON FINAL FORM
+diff --git a/legacy_arabic_cmap/ArabicPUATraditional.txt b/legacy_arabic_cmap/ArabicPUATraditional.txt
+new file mode 100644
+index 0000000..5683b87
+--- /dev/null
++++ b/legacy_arabic_cmap/ArabicPUATraditional.txt
+@@ -0,0 +1,295 @@
++#
++#    Name:    Legacy Traditional Arabic encoding
++#
++#    Format: Three tab-separated columns
++#        Column #1 is the PUA code (in hex as 0xXXXX)
++#        Column #2 is the Unicode (in hex as 0xXXXX)
++#        Column #3 is the Unicode name (follows a comment sign, '#')
++#
++#    The entries are in PUA order
++#
++0xF200	0x063B	# ARABIC LETTER KEHEH WITH TWO DOTS ABOVE
++0xF200	0x063C	# ARABIC LETTER KEHEH WITH THREE DOTS BELOW
++0xF200	0x063D	# ARABIC LETTER FARSI YEH WITH INVERTED V
++0xF200	0x063E	# ARABIC LETTER FARSI YEH WITH TWO DOTS ABOVE
++0xF200	0x063F	# ARABIC LETTER FARSI YEH WITH THREE DOTS ABOVE
++0xF200	0x0653	# ARABIC MADDAH ABOVE
++0xF200	0x0654	# ARABIC HAMZA ABOVE
++0xF200	0x0655	# ARABIC HAMZA BELOW
++0xF200	0x0656	# ARABIC SUBSCRIPT ALEF
++0xF200	0x0657	# ARABIC INVERTED DAMMA
++0xF200	0x0658	# ARABIC MARK NOON GHUNNA
++0xF200	0x0659	# ARABIC ZWARAKAY
++0xF200	0x065A	# ARABIC VOWEL SIGN SMALL V ABOVE
++0xF200	0x065B	# ARABIC VOWEL SIGN INVERTED SMALL V ABOVE
++0xF200	0x065C	# ARABIC VOWEL SIGN DOT BELOW
++0xF200	0x065D	# ARABIC REVERSED DAMMA
++0xF200	0x065E	# ARABIC FATHA WITH TWO DOTS
++0xF202	0xFC08	# ARABIC LIGATURE BEH WITH MEEM ISOLATED FORM
++0xF203	0xFC0E	# ARABIC LIGATURE TEH WITH MEEM ISOLATED FORM
++0xF204	0xFC12	# ARABIC LIGATURE THEH WITH MEEM ISOLATED FORM
++0xF205	0xFC42	# ARABIC LIGATURE LAM WITH MEEM ISOLATED FORM
++0xF206	0xFC4E	# ARABIC LIGATURE NOON WITH MEEM ISOLATED FORM
++0xF20C	0x200C	# ZERO WIDTH NON-JOINER
++0xF20D	0x200D	# ZERO WIDTH JOINER
++0xF20E	0x200E	# LEFT-TO-RIGHT MARK
++0xF20F	0x200F	# RIGHT-TO-LEFT MARK
++0xF210	0xFD88	# ARABIC LIGATURE LAM WITH MEEM WITH HAH INITIAL FORM
++0xF212	0xFC3F	# ARABIC LIGATURE LAM WITH JEEM ISOLATED FORM
++0xF213	0xFC40	# ARABIC LIGATURE LAM WITH HAH ISOLATED FORM
++0xF214	0xFC41	# ARABIC LIGATURE LAM WITH KHAH ISOLATED FORM
++0xF215	0xFC6A	# ARABIC LIGATURE BEH WITH REH FINAL FORM
++0xF216	0xFC70	# ARABIC LIGATURE TEH WITH REH FINAL FORM
++0xF217	0xFC91	# ARABIC LIGATURE YEH WITH REH FINAL FORM
++0xF218	0xFCB0	# ARABIC LIGATURE SEEN WITH MEEM INITIAL FORM
++0xF219	0xFD30	# ARABIC LIGATURE SHEEN WITH MEEM INITIAL FORM
++0xF21A	0xFCCD	# ARABIC LIGATURE LAM WITH HEH INITIAL FORM
++0xF21C	0xFC44	# ARABIC LIGATURE LAM WITH YEH ISOLATED FORM
++0xF21D	0xFC0A	# ARABIC LIGATURE BEH WITH YEH ISOLATED FORM
++0xF21E	0xFC10	# ARABIC LIGATURE TEH WITH YEH ISOLATED FORM
++0xF21F	0xFC50	# ARABIC LIGATURE NOON WITH YEH ISOLATED FORM
++0xF220	0x0020	# SPACE
++0xF221	0x0021	# EXCLAMATION MARK
++0xF222	0x0022	# QUOTATION MARK
++0xF223	0x00AB	# LEFT-POINTING DOUBLE ANGLE QUOTATION MARK
++0xF224	0x00BB	# RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK
++0xF225	0x0025	# PERCENT SIGN
++0xF226	0x00D7	# MULTIPLICATION SIGN
++0xF227	0x00F7	# DIVISION SIGN
++0xF228	0x0028	# LEFT PARENTHESIS
++0xF229	0x0029	# RIGHT PARENTHESIS
++0xF22A	0x002A	# ASTERISK
++0xF22B	0x002B	# PLUS SIGN
++0xF22C	0x060C	# ARABIC COMMA
++0xF22D	0x002D	# HYPHEN-MINUS
++0xF22E	0x002E	# FULL STOP
++0xF22F	0x002F	# SOLIDUS
++0xF230	0x0660	# ARABIC-INDIC DIGIT ZERO
++0xF231	0x0661	# ARABIC-INDIC DIGIT ONE
++0xF232	0x0662	# ARABIC-INDIC DIGIT TWO
++0xF233	0x0663	# ARABIC-INDIC DIGIT THREE
++0xF234	0x0664	# ARABIC-INDIC DIGIT FOUR
++0xF235	0x0665	# ARABIC-INDIC DIGIT FIVE
++0xF236	0x0666	# ARABIC-INDIC DIGIT SIX
++0xF237	0x0667	# ARABIC-INDIC DIGIT SEVEN
++0xF238	0x0668	# ARABIC-INDIC DIGIT EIGHT
++0xF239	0x0669	# ARABIC-INDIC DIGIT NINE
++0xF23A	0x003A	# COLON
++0xF23B	0x003B	# SEMICOLON
++0xF23B	0x061B	# ARABIC SEMICOLON
++0xF23C	0x201C	# LEFT DOUBLE QUOTATION MARK
++0xF23D	0x003D	# EQUALS SIGN
++0xF23E	0x201D	# RIGHT DOUBLE QUOTATION MARK
++0xF23F	0x003F	# QUESTION MARK
++0xF23F	0x061F	# ARABIC QUESTION MARK
++0xF241	0x0627	# ARABIC LETTER ALEF
++0xF241	0xFE8D	# ARABIC LETTER ALEF ISOLATED FORM
++0xF242	0xFE8E	# ARABIC LETTER ALEF FINAL FORM
++0xF243	0x0623	# ARABIC LETTER ALEF WITH HAMZA ABOVE
++0xF243	0xFE83	# ARABIC LETTER ALEF WITH HAMZA ABOVE ISOLATED FORM
++0xF244	0xFE84	# ARABIC LETTER ALEF WITH HAMZA ABOVE FINAL FORM
++0xF245	0x0622	# ARABIC LETTER ALEF WITH MADDA ABOVE
++0xF245	0xFE81	# ARABIC LETTER ALEF WITH MADDA ABOVE ISOLATED FORM
++0xF246	0xFE82	# ARABIC LETTER ALEF WITH MADDA ABOVE FINAL FORM
++0xF247	0x0625	# ARABIC LETTER ALEF WITH HAMZA BELOW
++0xF247	0xFE87	# ARABIC LETTER ALEF WITH HAMZA BELOW ISOLATED FORM
++0xF248	0xFE88	# ARABIC LETTER ALEF WITH HAMZA BELOW FINAL FORM
++0xF249	0xFE91	# ARABIC LETTER BEH INITIAL FORM
++0xF24A	0xFE92	# ARABIC LETTER BEH MEDIAL FORM
++0xF24B	0xFE90	# ARABIC LETTER BEH FINAL FORM
++0xF24C	0x0628	# ARABIC LETTER BEH
++0xF24C	0xFE8F	# ARABIC LETTER BEH ISOLATED FORM
++0xF24D	0xFE97	# ARABIC LETTER TEH INITIAL FORM
++0xF24E	0xFE98	# ARABIC LETTER TEH MEDIAL FORM
++0xF24F	0xFE96	# ARABIC LETTER TEH FINAL FORM
++0xF250	0x062A	# ARABIC LETTER TEH
++0xF250	0xFE95	# ARABIC LETTER TEH ISOLATED FORM
++0xF251	0xFE9B	# ARABIC LETTER THEH INITIAL FORM
++0xF252	0xFE9C	# ARABIC LETTER THEH MEDIAL FORM
++0xF253	0xFE9A	# ARABIC LETTER THEH FINAL FORM
++0xF254	0x062B	# ARABIC LETTER THEH
++0xF254	0xFE99	# ARABIC LETTER THEH ISOLATED FORM
++0xF255	0xFE9F	# ARABIC LETTER JEEM INITIAL FORM
++0xF256	0xFEA0	# ARABIC LETTER JEEM MEDIAL FORM
++0xF257	0xFE9E	# ARABIC LETTER JEEM FINAL FORM
++0xF258	0x062C	# ARABIC LETTER JEEM
++0xF258	0xFE9D	# ARABIC LETTER JEEM ISOLATED FORM
++0xF259	0xFEA3	# ARABIC LETTER HAH INITIAL FORM
++0xF25A	0xFEA4	# ARABIC LETTER HAH MEDIAL FORM
++0xF25B	0x005B	# LEFT SQUARE BRACKET
++0xF25C	0xFEA2	# ARABIC LETTER HAH FINAL FORM
++0xF25D	0x005D	# RIGHT SQUARE BRACKET
++0xF25E	0x002C	# COMMA
++0xF25E	0x066B	# ARABIC DECIMAL SEPARATOR
++0xF25E	0x066C	# ARABIC THOUSANDS SEPARATOR
++0xF25F	0x0640	# ARABIC TATWEEL
++0xF260	0x062D	# ARABIC LETTER HAH
++0xF260	0xFEA1	# ARABIC LETTER HAH ISOLATED FORM
++0xF261	0xFEA7	# ARABIC LETTER KHAH INITIAL FORM
++0xF262	0xFEA8	# ARABIC LETTER KHAH MEDIAL FORM
++0xF263	0xFEA6	# ARABIC LETTER KHAH FINAL FORM
++0xF264	0x062E	# ARABIC LETTER KHAH
++0xF264	0xFEA5	# ARABIC LETTER KHAH ISOLATED FORM
++0xF265	0x062F	# ARABIC LETTER DAL
++0xF265	0xFEA9	# ARABIC LETTER DAL ISOLATED FORM
++0xF266	0xFEAA	# ARABIC LETTER DAL FINAL FORM
++0xF267	0x0630	# ARABIC LETTER THAL
++0xF267	0xFEAB	# ARABIC LETTER THAL ISOLATED FORM
++0xF268	0xFEAC	# ARABIC LETTER THAL FINAL FORM
++0xF269	0x0631	# ARABIC LETTER REH
++0xF269	0xFEAD	# ARABIC LETTER REH ISOLATED FORM
++0xF26A	0xFEAE	# ARABIC LETTER REH FINAL FORM
++0xF26B	0x0632	# ARABIC LETTER ZAIN
++0xF26B	0xFEAF	# ARABIC LETTER ZAIN ISOLATED FORM
++0xF26C	0xFEB0	# ARABIC LETTER ZAIN FINAL FORM
++0xF26D	0xFEB3	# ARABIC LETTER SEEN INITIAL FORM
++0xF26E	0xFEB4	# ARABIC LETTER SEEN MEDIAL FORM
++0xF26F	0xFEB2	# ARABIC LETTER SEEN FINAL FORM
++0xF270	0x0633	# ARABIC LETTER SEEN
++0xF270	0xFEB1	# ARABIC LETTER SEEN ISOLATED FORM
++0xF271	0xFEB7	# ARABIC LETTER SHEEN INITIAL FORM
++0xF272	0xFEB8	# ARABIC LETTER SHEEN MEDIAL FORM
++0xF273	0xFEB6	# ARABIC LETTER SHEEN FINAL FORM
++0xF274	0x0634	# ARABIC LETTER SHEEN
++0xF274	0xFEB5	# ARABIC LETTER SHEEN ISOLATED FORM
++0xF275	0xFEBB	# ARABIC LETTER SAD INITIAL FORM
++0xF276	0xFEBC	# ARABIC LETTER SAD MEDIAL FORM
++0xF277	0xFEBA	# ARABIC LETTER SAD FINAL FORM
++0xF278	0x0635	# ARABIC LETTER SAD
++0xF278	0xFEB9	# ARABIC LETTER SAD ISOLATED FORM
++0xF279	0xFEBF	# ARABIC LETTER DAD INITIAL FORM
++0xF27A	0xFEC0	# ARABIC LETTER DAD MEDIAL FORM
++0xF27B	0xFD3E	# ORNATE LEFT PARENTHESIS
++0xF27C	0xFEBE	# ARABIC LETTER DAD FINAL FORM
++0xF27D	0xFD3F	# ORNATE RIGHT PARENTHESIS
++0xF27E	0x0636	# ARABIC LETTER DAD
++0xF27E	0xFEBD	# ARABIC LETTER DAD ISOLATED FORM
++0xF27F	0xFEC3	# ARABIC LETTER TAH INITIAL FORM
++0xF280	0xFC9C	# ARABIC LIGATURE BEH WITH JEEM INITIAL FORM
++0xF281	0xFC9D	# ARABIC LIGATURE BEH WITH HAH INITIAL FORM
++0xF282	0xFC9E	# ARABIC LIGATURE BEH WITH KHAH INITIAL FORM
++0xF283	0xFCA1	# ARABIC LIGATURE TEH WITH JEEM INITIAL FORM
++0xF284	0xFCA2	# ARABIC LIGATURE TEH WITH HAH INITIAL FORM
++0xF285	0xFCA3	# ARABIC LIGATURE TEH WITH KHAH INITIAL FORM
++0xF286	0xFCC9	# ARABIC LIGATURE LAM WITH JEEM INITIAL FORM
++0xF287	0xFCCA	# ARABIC LIGATURE LAM WITH HAH INITIAL FORM
++0xF288	0xFCCB	# ARABIC LIGATURE LAM WITH KHAH INITIAL FORM
++0xF289	0xFCCE	# ARABIC LIGATURE MEEM WITH JEEM INITIAL FORM
++0xF28A	0xFCCF	# ARABIC LIGATURE MEEM WITH HAH INITIAL FORM
++0xF28B	0xFCD0	# ARABIC LIGATURE MEEM WITH KHAH INITIAL FORM
++0xF28D	0xFCD2	# ARABIC LIGATURE NOON WITH JEEM INITIAL FORM
++0xF28E	0xFCD3	# ARABIC LIGATURE NOON WITH HAH INITIAL FORM
++0xF28F	0xFCDA	# ARABIC LIGATURE YEH WITH JEEM INITIAL FORM
++0xF290	0xFCDB	# ARABIC LIGATURE YEH WITH HAH INITIAL FORM
++0xF291	0xFCDC	# ARABIC LIGATURE YEH WITH KHAH INITIAL FORM
++0xF292	0xFC6D	# ARABIC LIGATURE BEH WITH NOON FINAL FORM
++0xF293	0xFC73	# ARABIC LIGATURE TEH WITH NOON FINAL FORM
++0xF294	0xFC94	# ARABIC LIGATURE YEH WITH NOON FINAL FORM
++0xF295	0xFC43	# ARABIC LIGATURE LAM WITH ALEF MAKSURA ISOLATED FORM
++0xF296	0xFC9F	# ARABIC LIGATURE BEH WITH MEEM INITIAL FORM
++0xF297	0xFCA4	# ARABIC LIGATURE TEH WITH MEEM INITIAL FORM
++0xF298	0xFCD5	# ARABIC LIGATURE NOON WITH MEEM INITIAL FORM
++0xF299	0xFCDD	# ARABIC LIGATURE YEH WITH MEEM INITIAL FORM
++0xF29A	0xFCA8	# ARABIC LIGATURE JEEM WITH MEEM INITIAL FORM
++0xF29B	0xFCAA	# ARABIC LIGATURE HAH WITH MEEM INITIAL FORM
++0xF29C	0xFCAC	# ARABIC LIGATURE KHAH WITH MEEM INITIAL FORM
++0xF29D	0xFCCC	# ARABIC LIGATURE LAM WITH MEEM INITIAL FORM
++0xF29E	0xFCD1	# ARABIC LIGATURE MEEM WITH MEEM INITIAL FORM
++0xF29F	0xFC32	# ARABIC LIGATURE FEH WITH YEH ISOLATED FORM
++0xF2A1	0xFEC2	# ARABIC LETTER TAH FINAL FORM
++0xF2A2	0x0637	# ARABIC LETTER TAH
++0xF2A2	0xFEC1	# ARABIC LETTER TAH ISOLATED FORM
++0xF2A3	0x0638	# ARABIC LETTER ZAH
++0xF2A3	0xFEC7	# ARABIC LETTER ZAH INITIAL FORM
++0xF2A4	0xFEC8	# ARABIC LETTER ZAH MEDIAL FORM
++0xF2A5	0xFEC6	# ARABIC LETTER ZAH FINAL FORM
++0xF2A6	0xFEC5	# ARABIC LETTER ZAH ISOLATED FORM
++0xF2A7	0xFECB	# ARABIC LETTER AIN INITIAL FORM
++0xF2A8	0xFECC	# ARABIC LETTER AIN MEDIAL FORM
++0xF2A9	0xFECA	# ARABIC LETTER AIN FINAL FORM
++0xF2AA	0x0639	# ARABIC LETTER AIN
++0xF2AA	0xFEC9	# ARABIC LETTER AIN ISOLATED FORM
++0xF2AB	0xFECF	# ARABIC LETTER GHAIN INITIAL FORM
++0xF2AC	0xFED0	# ARABIC LETTER GHAIN MEDIAL FORM
++0xF2AD	0xFECE	# ARABIC LETTER GHAIN FINAL FORM
++0xF2AE	0x063A	# ARABIC LETTER GHAIN
++0xF2AE	0xFECD	# ARABIC LETTER GHAIN ISOLATED FORM
++0xF2AF	0xFED3	# ARABIC LETTER FEH INITIAL FORM
++0xF2B0	0xFED4	# ARABIC LETTER FEH MEDIAL FORM
++0xF2B1	0xFED2	# ARABIC LETTER FEH FINAL FORM
++0xF2B2	0x0641	# ARABIC LETTER FEH
++0xF2B2	0xFED1	# ARABIC LETTER FEH ISOLATED FORM
++0xF2B3	0xFED7	# ARABIC LETTER QAF INITIAL FORM
++0xF2B4	0xFED8	# ARABIC LETTER QAF MEDIAL FORM
++0xF2B5	0xFED6	# ARABIC LETTER QAF FINAL FORM
++0xF2B6	0x0642	# ARABIC LETTER QAF
++0xF2B6	0xFED5	# ARABIC LETTER QAF ISOLATED FORM
++0xF2B7	0xFEDB	# ARABIC LETTER KAF INITIAL FORM
++0xF2B8	0xFEDC	# ARABIC LETTER KAF MEDIAL FORM
++0xF2B9	0xFEDA	# ARABIC LETTER KAF FINAL FORM
++0xF2BA	0x0643	# ARABIC LETTER KAF
++0xF2BA	0xFED9	# ARABIC LETTER KAF ISOLATED FORM
++0xF2BB	0xFEDF	# ARABIC LETTER LAM INITIAL FORM
++0xF2BC	0xFEE0	# ARABIC LETTER LAM MEDIAL FORM
++0xF2BD	0xFEDE	# ARABIC LETTER LAM FINAL FORM
++0xF2BE	0x0644	# ARABIC LETTER LAM
++0xF2BE	0xFEDD	# ARABIC LETTER LAM ISOLATED FORM
++0xF2BF	0xFEE3	# ARABIC LETTER MEEM INITIAL FORM
++0xF2C0	0xFEE4	# ARABIC LETTER MEEM MEDIAL FORM
++0xF2C1	0xFEE2	# ARABIC LETTER MEEM FINAL FORM
++0xF2C2	0x0645	# ARABIC LETTER MEEM
++0xF2C2	0xFEE1	# ARABIC LETTER MEEM ISOLATED FORM
++0xF2C3	0xFEE7	# ARABIC LETTER NOON INITIAL FORM
++0xF2C4	0xFEE8	# ARABIC LETTER NOON MEDIAL FORM
++0xF2C5	0xFEE6	# ARABIC LETTER NOON FINAL FORM
++0xF2C6	0x0646	# ARABIC LETTER NOON
++0xF2C6	0xFEE5	# ARABIC LETTER NOON ISOLATED FORM
++0xF2C7	0xFEEB	# ARABIC LETTER HEH INITIAL FORM
++0xF2C8	0xFEEC	# ARABIC LETTER HEH MEDIAL FORM
++0xF2C9	0xFEEA	# ARABIC LETTER HEH FINAL FORM
++0xF2CA	0x0647	# ARABIC LETTER HEH
++0xF2CA	0xFEE9	# ARABIC LETTER HEH ISOLATED FORM
++0xF2CB	0x0648	# ARABIC LETTER WAW
++0xF2CB	0xFEED	# ARABIC LETTER WAW ISOLATED FORM
++0xF2CC	0xFEEE	# ARABIC LETTER WAW FINAL FORM
++0xF2CD	0xFEF3	# ARABIC LETTER YEH INITIAL FORM
++0xF2CE	0xFEF4	# ARABIC LETTER YEH MEDIAL FORM
++0xF2CF	0xFEF2	# ARABIC LETTER YEH FINAL FORM
++0xF2D0	0x064A	# ARABIC LETTER YEH
++0xF2D0	0xFEF1	# ARABIC LETTER YEH ISOLATED FORM
++0xF2D1	0x0629	# ARABIC LETTER TEH MARBUTA
++0xF2D1	0xFE93	# ARABIC LETTER TEH MARBUTA ISOLATED FORM
++0xF2D2	0xFE94	# ARABIC LETTER TEH MARBUTA FINAL FORM
++0xF2D3	0xFEF0	# ARABIC LETTER ALEF MAKSURA FINAL FORM
++0xF2D4	0x0649	# ARABIC LETTER ALEF MAKSURA
++0xF2D4	0xFEEF	# ARABIC LETTER ALEF MAKSURA ISOLATED FORM
++0xF2D5	0x0621	# ARABIC LETTER HAMZA
++0xF2D6	0xFE8B	# ARABIC LETTER YEH WITH HAMZA ABOVE INITIAL FORM
++0xF2D7	0xFE8C	# ARABIC LETTER YEH WITH HAMZA ABOVE MEDIAL FORM
++0xF2D8	0xFE8A	# ARABIC LETTER YEH WITH HAMZA ABOVE FINAL FORM
++0xF2D9	0x0626	# ARABIC LETTER YEH WITH HAMZA ABOVE
++0xF2D9	0xFE89	# ARABIC LETTER YEH WITH HAMZA ABOVE ISOLATED FORM
++0xF2DA	0x0624	# ARABIC LETTER WAW WITH HAMZA ABOVE
++0xF2DA	0xFE85	# ARABIC LETTER WAW WITH HAMZA ABOVE ISOLATED FORM
++0xF2DB	0xFE86	# ARABIC LETTER WAW WITH HAMZA ABOVE FINAL FORM
++0xF2DC	0xFEFB	# ARABIC LIGATURE LAM WITH ALEF ISOLATED FORM
++0xF2DD	0xFEFC	# ARABIC LIGATURE LAM WITH ALEF FINAL FORM
++0xF2DE	0xFEF7	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA ABOVE ISOLATED FORM
++0xF2DF	0xFEF8	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA ABOVE FINAL FORM
++0xF2E0	0xFEF5	# ARABIC LIGATURE LAM WITH ALEF WITH MADDA ABOVE ISOLATED FORM
++0xF2E1	0xFEF6	# ARABIC LIGATURE LAM WITH ALEF WITH MADDA ABOVE FINAL FORM
++0xF2E2	0xFEF9	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA BELOW ISOLATED FORM
++0xF2E3	0xFEFA	# ARABIC LIGATURE LAM WITH ALEF WITH HAMZA BELOW FINAL FORM
++0xF2E4	0x064E	# ARABIC FATHA
++0xF2E5	0x064F	# ARABIC DAMMA
++0xF2E6	0x0652	# ARABIC SUKUN
++0xF2E7	0x064B	# ARABIC FATHATAN
++0xF2E8	0x064C	# ARABIC DAMMATAN
++0xF2E9	0x0651	# ARABIC SHADDA
++0xF2EA	0x0650	# ARABIC KASRA
++0xF2EB	0x064D	# ARABIC KASRATAN
++0xF2EC	0xFC60	# ARABIC LIGATURE SHADDA WITH FATHA ISOLATED FORM
++0xF2ED	0xFC61	# ARABIC LIGATURE SHADDA WITH DAMMA ISOLATED FORM
++0xF2EF	0xFC5E	# ARABIC LIGATURE SHADDA WITH DAMMATAN ISOLATED FORM
++0xF2F0	0xFC62	# ARABIC LIGATURE SHADDA WITH KASRA ISOLATED FORM
++0xF2F1	0xFEC4	# ARABIC LETTER TAH MEDIAL FORM
+diff --git a/legacy_arabic_cmap/gen_arabic_charmap.py b/legacy_arabic_cmap/gen_arabic_charmap.py
+new file mode 100644
+index 0000000..8091a33
+--- /dev/null
++++ b/legacy_arabic_cmap/gen_arabic_charmap.py
+@@ -0,0 +1,187 @@
++#!/usr/bin/env python3
++
++from abc import ABC, abstractmethod
++from pathlib import Path
++from typing import Self
++import textwrap
++
++
++class HashFunc(ABC):
++    @abstractmethod
++    def __call__(self, value: int) -> int: ...
++    @abstractmethod
++    def text(self) -> str: ...
++
++class Identity(HashFunc):
++    def __call__(self : Self, value : int) -> int:
++        return value
++    def text(self : Self) -> str:
++        return f"symbol"
++
++class Shift(HashFunc):
++    shift : int
++    def __init__(self : Self, shift : int):
++        self.shift = shift
++    def __call__(self : Self, value : int) -> int:
++        return value >> self.shift
++    def text(self : Self) -> str:
++        return f"symbol >> {self.shift}"
++
++class XorShift(HashFunc):
++    shift : int
++    def __init__(self : Self, shift : int):
++        self.shift = shift
++    def __call__(self : Self, value : int) -> int:
++        return value ^ (value >> self.shift)
++    def text(self : Self) -> str:
++        return f"symbol ^ symbol >> {self.shift}"
++
++def test_hash(table : list[list[int]], func : HashFunc, n : int) -> bool:
++    mask = (1 << n) - 1
++    check = [False] * (1 << n)
++    for code, _ in table:
++        index = func(code) & mask
++        if check[index]:
++            return False
++        check[index] = True
++    return True
++
++def hash_functions():
++    yield Identity()
++    for shift in range(1, 16):
++        yield Shift(shift)
++    for shift in range(1, 16):
++        yield XorShift(shift)
++
++def find_hash(table : list[list[int]]) -> tuple[HashFunc, int]:
++    m = len(table).bit_length()
++    for n in [m, m + 1]:
++        for func in hash_functions():
++            if test_hash(table, func, n):
++                return func, n
++    raise Exception("Cannot find suitable hash function!")
++
++
++LICENSE_HEADER = """\
++/*
++ * Copyright (C) 2026
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++// WARNING - THIS FILE IS AUTO-GENERATED. DO NOT EDIT IT MANUALLY.
++// Regenerate with: python3 gen_arabic_charmap.py
++"""
++
++def render_function(file_content: list[str], function_name: str, unicode_mapping_file: Path):
++    table = []
++    res_min = 1 << 32
++    with open(unicode_mapping_file, encoding="utf-8") as f:
++        lines = f.readlines()
++        for line in lines:
++            if line.startswith("#"):
++                continue
++            pua_code_str, unicode_str, _ = line.split("\t")
++            unicode = int(unicode_str, 0)
++            pua_code = int(pua_code_str, 0)
++            table.extend([[unicode, pua_code]])
++            res_min = min(res_min, pua_code)
++
++    func, n = find_hash(table)
++
++    n1 = n - 1
++    mask = (1 << n) - 1
++    checks = [1] * (1 << n1) + [0] * (1 << n1)
++    results = [0] * (1 << n)
++    for unicode, pua_code in table:
++        hash_val = func(unicode)
++        index = hash_val & mask
++        checks[index] = hash_val >> n1
++        results[index] = pua_code - res_min
++        if checks[index] > 255:
++            raise Exception("uint8_t isn't enough for check table!")
++        if results[index] > 255:
++            raise Exception("uint8_t isn't enough for result table!")
++
++    file_content.append(f"static const uint8_t {function_name}_check[{1 << n}] = {{")
++    for line in textwrap.wrap(", ".join(map(str, checks)), width = 100):
++        file_content.append(f"    {line}")
++    file_content.append("};")
++    file_content.append("")
++
++    file_content.append(f"static const uint8_t {function_name}_result[{1 << n}] = {{")
++    for line in textwrap.wrap(", ".join(map(str, results)), width = 100):
++        file_content.append(f"    {line}")
++    file_content.append("};")
++    file_content.append("")
++
++    expr = func.text()
++    file_content.append(f"uint32_t {function_name}(uint32_t symbol)")
++    file_content.append("{")
++    file_content.append(f"    unsigned hash = {expr}, index = hash & {mask}, test = hash >> {n1};")
++    file_content.append(f"    return test == {function_name}_check[index] ?")
++    file_content.append(f"      {res_min} + {function_name}_result[index] : symbol;")
++    file_content.append("}")
++    file_content.append("")
++
++
++def render_header(function_names: list[str]) -> list[str]:
++    file_content = []
++    guard = "LIBASS_ASS_ARABIC_CHARMAP_H"
++
++    file_content.append(LICENSE_HEADER)
++    file_content.append(f"#ifndef {guard}")
++    file_content.append(f"#define {guard}")
++    file_content.append("")
++    file_content.append("#include <stdint.h>")
++    file_content.append("")
++    for name in function_names:
++        file_content.append(f"uint32_t {name}(uint32_t symbol);")
++    file_content.append("")
++    file_content.append(f"#endif /* {guard} */")
++    file_content.append("")
++    return file_content
++
++
++def main():
++    SOURCES = [
++        {
++            "file": Path(__file__).parent.joinpath("ArabicPUASimplified.txt"),
++            "function": "ass_font_charmap_arabic_simplified",
++        },
++        {
++            "file": Path(__file__).parent.joinpath("ArabicPUATraditional.txt"),
++            "function": "ass_font_charmap_arabic_traditional",
++        },
++    ]
++
++    c_file_content = []
++    c_file_content.append(LICENSE_HEADER)
++    c_file_content.append("#include \"ass_arabic_charmap.h\"")
++    c_file_content.append("")
++
++    for source in SOURCES:
++        render_function(c_file_content, source["function"], source["file"])
++
++    c_file_path = Path(__file__).parent.parent.joinpath("libass", "ass_arabic_charmap.c")
++    c_file_path.write_text("\n".join(c_file_content), encoding="utf-8")
++
++    h_file_content = render_header([source["function"] for source in SOURCES])
++    h_file_path = Path(__file__).parent.parent.joinpath("libass", "ass_arabic_charmap.h")
++    h_file_path.write_text("\n".join(h_file_content), encoding="utf-8")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index 738d935..1830e08 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -1,5 +1,5 @@
+ LIBASS_LT_CURRENT = 13
+-LIBASS_LT_REVISION = 1
++LIBASS_LT_REVISION = 2
+ LIBASS_LT_AGE = 4
+ 
+ .asm.lo:
+@@ -11,7 +11,8 @@ libass_libass_internal_la_SOURCES = \
+     libass/ass_string.h libass/ass_string.c \
+     libass/ass_compat.h libass/ass_strtod.c \
+     libass/ass_filesystem.h libass/ass_filesystem.c \
+-    libass/ass_types.h libass/ass.h libass/ass_priv.h libass/ass.c \
++    libass/ass_types.h libass/ass_metrics.h \
++    libass/ass.h libass/ass_priv.h libass/ass.c \
+     libass/ass_library.h libass/ass_library.c \
+     libass/ass_cache_template.h libass/ass_cache.h libass/ass_cache.c \
+     libass/ass_font.h libass/ass_font.c \
+@@ -24,8 +25,10 @@ libass_libass_internal_la_SOURCES = \
+     libass/ass_rasterizer.h libass/ass_rasterizer.c \
+     libass/ass_render.h libass/ass_render.c libass/ass_render_api.c \
+     libass/ass_bitmap_engine.h libass/ass_bitmap_engine.c \
++    libass/ass_arabic_charmap.h libass/ass_arabic_charmap.c \
+     libass/c/rasterizer_template.h libass/c/c_rasterizer.c \
+     libass/c/c_blend_bitmaps.c \
++    libass/c/c_shift.c \
+     libass/c/c_be_blur.c \
+     libass/c/blur_template.h libass/c/c_blur.c \
+     libass/wyhash.h
+@@ -35,6 +38,7 @@ if X86
+ libass_libass_internal_la_SOURCES += \
+     libass/x86/rasterizer.asm \
+     libass/x86/blend_bitmaps.asm \
++    libass/x86/shift.asm \
+     libass/x86/be_blur.asm \
+     libass/x86/blur.asm \
+     libass/x86/cpuid.h libass/x86/cpuid.asm
+@@ -43,6 +47,7 @@ if AARCH64
+ libass_libass_internal_la_SOURCES += \
+     libass/aarch64/rasterizer.S \
+     libass/aarch64/blend_bitmaps.S \
++    libass/aarch64/shift.S \
+     libass/aarch64/be_blur.S \
+     libass/aarch64/blur.S \
+     libass/aarch64/asm.S
+@@ -71,7 +76,7 @@ libass_libass_la_LDFLAGS = -no-undefined -version-info $(LIBASS_LT_CURRENT):$(LI
+ libass_libass_la_LDFLAGS += -export-symbols $(top_srcdir)/libass/libass.sym
+ 
+ assheadersdir = $(includedir)/ass
+-dist_assheaders_HEADERS = libass/ass_types.h libass/ass.h
++dist_assheaders_HEADERS = libass/ass_types.h libass/ass_metrics.h libass/ass.h
+ 
+ EXTRA_DIST += \
+     libass/x86/x86inc.asm libass/x86/utils.asm \
+diff --git a/libass/aarch64/shift.S b/libass/aarch64/shift.S
+new file mode 100644
+index 0000000..90ee103
+--- /dev/null
++++ b/libass/aarch64/shift.S
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (C) 2026 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "asm.S"
++
++/*
++ * shift_x
++ * Perform subpixel shift along X axis
++ */
++
++.macro shift_x dst1, dst2, src1, src2, mul, vtmp1, vtmp2
++    ext \vtmp1\().16b, \src1\().16b, \src2\().16b, 1
++    ushll \dst1\().8h, \src1\().8b, 6
++    usubl \vtmp2\().8h, \src1\().8b, \vtmp1\().8b
++    mls \dst1\().8h, \vtmp2\().8h, \mul\().h[0]
++    ushll2 \dst2\().8h, \src1\().16b, 6
++    usubl2 \vtmp2\().8h, \src1\().16b, \vtmp1\().16b
++    mls \dst2\().8h, \vtmp2\().8h, \mul\().h[0]
++.endm
++
++/*
++ * shift_y
++ * Perform subpixel shift along Y axis
++ */
++
++.macro shift_y src11, src12, src21, src22, mul, mode=
++.ifb \mode
++    sub \src21\().8h, \src11\().8h, \src21\().8h
++    sqdmulh \src21\().8h, \src21\().8h, \mul\().h[1]
++.else
++    sqdmulh \src21\().8h, \src11\().8h, \mul\().h[1]
++.endif
++    sub \src11\().8h, \src11\().8h, \src21\().8h
++    uqrshrn \src11\().8b, \src11\().8h, 6
++.ifb \mode
++    sub \src22\().8h, \src12\().8h, \src22\().8h
++    sqdmulh \src22\().8h, \src22\().8h, \mul\().h[1]
++.else
++    sqdmulh \src22\().8h, \src12\().8h, \mul\().h[1]
++.endif
++    sub \src12\().8h, \src12\().8h, \src22\().8h
++    uqrshrn2 \src11\().16b, \src12\().8h, 6
++.endm
++
++/*
++ * void ass_shift_c(uint8_t *buf, ptrdiff_t stride,
++ *                  size_t width, size_t height, int shift_x, int shift_y);
++ */
++
++function shift_neon, export=1
++    add w4, w4, w5, lsl 16 + 9
++    mov v6.s[0], w4
++    add x4, x0, x1
++    sub x1, x1, x2
++    and x1, x1, ~15
++    sub x3, x3, 1
++    movi v7.16b, 0
++
++0:
++    mov x6, x0
++    ld1 {v0.16b}, [x0], #16
++    ld1 {v1.16b}, [x4], #16
++    subs x5, x2, 16
++    b.ls 2f
++1:
++    mov v16.16b, v0.16b
++    ld1 {v0.16b}, [x0], #16
++    shift_x v2, v3, v16, v0, v6, v17, v18
++    mov v16.16b, v1.16b
++    ld1 {v1.16b}, [x4], #16
++    shift_x v4, v5, v16, v1, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6
++    st1 {v2.16b}, [x6], #16
++    subs x5, x5, 16
++    b.hi 1b
++2:
++    shift_x v2, v3, v0, v7, v6, v17, v18
++    shift_x v4, v5, v1, v7, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6
++    st1 {v2.16b}, [x6]
++    add x0, x0, x1
++    add x4, x4, x1
++    subs x3, x3, 1
++    b.hi 0b
++
++    mov x6, x0
++    ld1 {v0.16b}, [x0], #16
++    subs x5, x2, 16
++    b.ls 4f
++3:
++    mov v16.16b, v0.16b
++    ld1 {v0.16b}, [x0], #16
++    shift_x v2, v3, v16, v0, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6, last
++    st1 {v2.16b}, [x6], #16
++    subs x5, x5, 16
++    b.hi 3b
++4:
++    shift_x v2, v3, v0, v7, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6, last
++    st1 {v2.16b}, [x6]
++    ret
++endfunc
+diff --git a/libass/ass.c b/libass/ass.c
+index 0b44649..7f46769 100644
+--- a/libass/ass.c
++++ b/libass/ass.c
+@@ -56,6 +56,14 @@ static const char *const ssa_style_format =
+ static const char *const ssa_event_format =
+         "Marked, Start, End, Style, Name, "
+         "MarginL, MarginR, MarginV, Effect, Text";
++static const char *const ass2_style_format =
++        "Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
++        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
++        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
++        "Alignment, MarginL, MarginR, MarginV, MarginB, Encoding, RelativeTo";
++static const char *const ass2_event_format =
++        "Layer, Start, End, Style, Name, "
++        "MarginL, MarginR, MarginV, MarginB, Effect, Text";
+ 
+ #define ASS_STYLES_ALLOC 20
+ 
+@@ -114,6 +122,11 @@ int ass_alloc_style(ASS_Track *track)
+ 
+     sid = track->n_styles++;
+     memset(track->styles + sid, 0, sizeof(ASS_Style));
++
++    // Explicitly flag newer values as unset
++    track->styles[sid].MarginB = INT_MIN;
++    track->styles[sid].RelativeTo = 2;
++
+     return sid;
+ }
+ 
+@@ -200,6 +213,11 @@ static int test_and_set_read_order_bit(ASS_Track *track, int id)
+ 
+ static inline void clear_read_order_bit(ASS_Track *track, int id)
+ {
++    // we previously loaded a packet with an invalid ReadOrder field
++    // (or int overflow) and decided to just skip checking for duplicates
++    if (id < 0)
++        return;
++
+     int index = id >> 5;
+     if (index < track->parser_priv->read_order_elems) {
+         uint32_t mask = ~(1u << (id & 0x1F));
+@@ -239,6 +257,8 @@ static void set_default_style(ASS_Style *style)
+     style->Shadow           = 3;
+     style->Alignment        = 2;
+     style->MarginL = style->MarginR = style->MarginV = 20;
++    style->MarginB = INT_MIN;
++    style->RelativeTo = 2;
+ }
+ 
+ static long long string2timecode(ASS_Library *library, char *p)
+@@ -517,6 +537,7 @@ static int process_event_tail(ASS_Track *track, ASS_Event *event,
+             INTVAL(MarginL)
+             INTVAL(MarginR)
+             INTVAL(MarginV)
++            INTVAL(MarginB)
+             TIMEVAL(Start)
+             TIMEVAL(Duration)
+         PARSE_END
+@@ -648,6 +669,8 @@ static int process_style(ASS_Track *track, char *str)
+         // probably an ancient script version
+         if (track->track_type == TRACK_TYPE_SSA)
+             track->style_format = strdup(ssa_style_format);
++        else if (track->track_type == TRACK_TYPE_ASS2)
++            track->style_format = strdup(ass2_style_format);
+         else
+             track->style_format = strdup(ass_style_format);
+         if (!track->style_format)
+@@ -703,7 +726,8 @@ static int process_style(ASS_Track *track, char *str)
+             FPVAL(Angle)
+             INTVAL(BorderStyle)
+             INTVAL(Alignment)
+-                if (track->track_type == TRACK_TYPE_ASS)
++                if (track->track_type == TRACK_TYPE_ASS ||
++                    track->track_type == TRACK_TYPE_ASS2)
+                     target->Alignment = numpad2align(target->Alignment);
+                 // VSFilter compatibility
+                 else if (target->Alignment == 8)
+@@ -713,7 +737,9 @@ static int process_style(ASS_Track *track, char *str)
+             INTVAL(MarginL)
+             INTVAL(MarginR)
+             INTVAL(MarginV)
++            INTVAL(MarginB)
+             INTVAL(Encoding)
++            INTVAL(RelativeTo)
+             FPVAL(ScaleX)
+             FPVAL(ScaleY)
+             FPVAL(Outline)
+@@ -819,7 +845,7 @@ static void custom_format_line_compatibility(ASS_Track *const track,
+ static int process_styles_line(ASS_Track *track, char *str)
+ {
+     int ret = 0;
+-    if (!strncmp(str, "Format:", 7)) {
++    if (!strncmp(str, "Format:", 7) && track->track_type != TRACK_TYPE_ASS2) {
+         char *p = str + 7;
+         skip_spaces(&p);
+         free(track->style_format);
+@@ -855,6 +881,10 @@ static inline void parse_script_type(ASS_Track *track, const char *str)
+         ver = TRACK_TYPE_ASS;
+         --len; --p;
+     }
++    if (*(p-1) == '+') {
++        ver = TRACK_TYPE_ASS2;
++        --len; --p;
++    }
+ 
+     if (len >= 4 && !strncmp(p-4, "4.00", 4))
+         track->track_type = ver;
+@@ -923,6 +953,8 @@ static void event_format_fallback(ASS_Track *track)
+     track->parser_priv->state = PST_EVENTS;
+     if (track->track_type == TRACK_TYPE_SSA)
+         track->event_format = strdup(ssa_event_format);
++    else if (track->track_type == TRACK_TYPE_ASS2)
++        track->event_format = strdup(ass2_event_format);
+     else
+         track->event_format = strdup(ass_event_format);
+     ass_msg(track->library, MSGL_V,
+@@ -987,7 +1019,7 @@ static bool detect_legacy_conv_subs(ASS_Track *track)
+ 
+ static int process_events_line(ASS_Track *track, char *str)
+ {
+-    if (!strncmp(str, "Format:", 7)) {
++    if (!strncmp(str, "Format:", 7) && track->track_type != TRACK_TYPE_ASS2) {
+         char *p = str + 7;
+         skip_spaces(&p);
+         free(track->event_format);
+@@ -1178,6 +1210,9 @@ static int process_line(ASS_Track *track, char *str)
+     } else if (!ass_strncasecmp(str, "[V4+ Styles]", 12)) {
+         track->parser_priv->state = PST_STYLES;
+         track->track_type = TRACK_TYPE_ASS;
++    } else if (!ass_strncasecmp(str, "[V4++ Styles]", 12)) {
++        track->parser_priv->state = PST_STYLES;
++        track->track_type = TRACK_TYPE_ASS2;
+     } else if (!ass_strncasecmp(str, "[Events]", 8)) {
+         track->parser_priv->state = PST_EVENTS;
+     } else if (!ass_strncasecmp(str, "[Fonts]", 7)) {
+@@ -1851,7 +1886,8 @@ void ass_lazy_track_init(ASS_Library *lib, ASS_Track *track)
+             ass_msg(lib, MSGL_WARN,
+                    "PlayResY undefined, setting to %d", track->PlayResY);
+         } else if (track->PlayResY <= 0) {
+-            track->PlayResY = FFMAX(1, track->PlayResX * 3LL / 4);
++            // overflow-safe `* 3/4`
++            track->PlayResY = FFMAX(1, (track->PlayResX - 1u) - (track->PlayResX - 1u) / 4u);
+             ass_msg(lib, MSGL_WARN,
+                    "PlayResY undefined, setting to %d", track->PlayResY);
+         } else if (track->PlayResX <= 0 && track->PlayResY == 1024) {
+@@ -1859,7 +1895,7 @@ void ass_lazy_track_init(ASS_Library *lib, ASS_Track *track)
+             ass_msg(lib, MSGL_WARN,
+                    "PlayResX undefined, setting to %d", track->PlayResX);
+         } else if (track->PlayResX <= 0) {
+-            track->PlayResX = FFMAX(1, track->PlayResY * 4LL / 3);
++            track->PlayResX = FFMIN(track->PlayResY + track->PlayResY / 3u, (unsigned) INT_MAX);
+             ass_msg(lib, MSGL_WARN,
+                    "PlayResX undefined, setting to %d", track->PlayResX);
+         }
+diff --git a/libass/ass.h b/libass/ass.h
+index 3ff1598..eb8d1e6 100644
+--- a/libass/ass.h
++++ b/libass/ass.h
+@@ -24,7 +24,7 @@
+ #include <stdarg.h>
+ #include "ass_types.h"
+ 
+-#define LIBASS_VERSION 0x01704000
++#define LIBASS_VERSION 0x01705000
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -161,7 +161,7 @@ typedef enum {
+      */
+     ASS_OVERRIDE_BIT_FONT_SIZE_FIELDS = 1 << 2,
+     /**
+-     * On dialogue events override: FontName, treat_fontname_as_pattern
++     * On dialogue events override: FontName
+      */
+     ASS_OVERRIDE_BIT_FONT_NAME = 1 << 3,
+     /**
+@@ -613,6 +613,9 @@ void ass_set_cache_limits(ASS_Renderer *priv, int glyph_max,
+  * \param now video timestamp in milliseconds
+  * \param detect_change compare to the previous call and set to 1
+  * if positions may have changed, or set to 2 if content may have changed.
++ *
++ * The returned ASS_Images live until the next call to ass_render_frame,
++ * ass_get_metrics, or ass_renderer_done.
+  */
+ ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
+                             long long now, int *detect_change);
+diff --git a/libass/ass_arabic_charmap.c b/libass/ass_arabic_charmap.c
+new file mode 100644
+index 0000000..d928dd7
+--- /dev/null
++++ b/libass/ass_arabic_charmap.c
+@@ -0,0 +1,155 @@
++/*
++ * Copyright (C) 2026
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++// WARNING - THIS FILE IS AUTO-GENERATED. DO NOT EDIT IT MANUALLY.
++// Regenerate with: python3 gen_arabic_charmap.py
++
++#include "ass_arabic_charmap.h"
++
++static const uint8_t ass_font_charmap_arabic_simplified_check[512] = {
++    1, 1, 1, 1, 1, 1, 1, 1, 48, 48, 48, 48, 1, 1, 1, 1, 1, 1, 1, 1, 48, 48, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5,
++    5, 5, 5, 5, 5, 5, 5, 5, 5, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0, 5, 0, 5, 5, 5, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5,
++    5, 5, 5, 5, 5, 5, 5, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0, 129, 0, 129, 129, 129,
++    129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
++    129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
++    129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 0, 129, 129,
++    129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
++    129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
++    129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
++    129
++};
++
++static const uint8_t ass_font_charmap_arabic_simplified_result[512] = {
++    0, 0, 0, 0, 0, 0, 0, 0, 15, 14, 12, 13, 0, 0, 0, 0, 0, 0, 0, 0, 60, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 63, 0, 0, 61, 184, 185, 59, 58, 176, 177, 179, 178, 183, 182, 180, 181, 32, 33, 0, 34, 0, 0, 0,
++    37, 47, 46, 94, 45, 40, 41, 43, 42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 92, 93, 0, 0,
++    91, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 38, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 0, 0, 0, 0, 0, 63, 0, 0, 0, 0, 0, 59, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 106, 110, 0, 114, 89, 90, 98, 96, 105, 104, 100, 102, 0, 173, 67, 69,
++    65, 186, 187, 71, 88, 87, 81, 84, 74, 169, 78, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    48, 49, 51, 50, 55, 54, 52, 53, 0, 0, 94, 0, 56, 57, 94, 0, 95, 117, 122, 120, 164, 225, 124, 126,
++    197, 196, 200, 203, 165, 172, 199, 168, 0, 0, 0, 0, 0, 0, 0, 0, 202, 201, 0, 198, 0, 0, 0, 0, 0, 0,
++    188, 0, 191, 194, 189, 195, 171, 168, 166, 167, 190, 193, 166, 192, 123, 126, 125, 126, 127, 225,
++    125, 225, 172, 165, 162, 165, 127, 164, 161, 163, 103, 105, 105, 105, 106, 106, 105, 106, 111, 113,
++    108, 114, 106, 110, 107, 109, 123, 124, 121, 124, 119, 122, 121, 122, 112, 117, 115, 117, 118, 120,
++    116, 120, 0, 69, 67, 70, 71, 187, 68, 187, 74, 66, 174, 65, 72, 186, 174, 175, 79, 80, 77, 81, 75,
++    78, 77, 78, 74, 73, 169, 73, 75, 76, 170, 76, 103, 104, 101, 104, 99, 102, 101, 102, 96, 98, 97, 98,
++    99, 100, 97, 100, 79, 84, 82, 83, 85, 86, 82, 87, 96, 90, 89, 90, 85, 88, 89, 88
++};
++
++uint32_t ass_font_charmap_arabic_simplified(uint32_t symbol)
++{
++    unsigned hash = symbol ^ symbol >> 1, index = hash & 511, test = hash >> 8;
++    return test == ass_font_charmap_arabic_simplified_check[index] ?
++      61696 + ass_font_charmap_arabic_simplified_result[index] : symbol;
++}
++
++static const uint8_t ass_font_charmap_arabic_traditional_check[1024] = {
++    1, 1, 1, 1, 1, 1, 1, 1, 24, 24, 24, 24, 1, 1, 1, 1, 1, 1, 24, 24, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,
++    2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1,
++    1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 1, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2,
++    2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 64, 1, 64, 64, 64, 64,
++    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
++    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
++    64, 64, 64, 64, 64, 64, 1, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
++    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
++    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 65, 0, 0, 65, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 0, 65, 0, 0, 65, 0, 0, 0, 0, 65, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 65, 0, 65, 0, 0, 0, 0, 0, 65, 65, 0, 65, 0, 0, 0, 0, 0, 0, 0, 65, 0, 0, 0, 65, 65, 65, 65, 65, 0,
++    0, 65, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 65, 65, 65, 65, 0, 65, 65, 65, 0, 0, 65, 65, 0, 0, 65, 65, 65, 65, 65, 65, 0, 0, 0, 65, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65, 65, 65, 65, 0, 0, 0, 0, 0, 65, 0, 0, 0, 0, 65, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 0, 65, 65, 65, 0, 0, 65, 0, 0, 0, 65, 0, 65, 0, 0, 65,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65, 65, 0, 0, 0,
++    0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
++};
++
++static const uint8_t ass_font_charmap_arabic_traditional_result[1024] = {
++    0, 0, 0, 0, 0, 0, 0, 0, 15, 14, 12, 13, 0, 0, 0, 0, 0, 0, 60, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 63, 0, 0, 61, 0, 0, 59, 58, 0, 0, 0, 0, 0, 0, 0, 0, 32, 33, 0, 34, 0, 0, 0, 37, 47, 46, 94, 45,
++    40, 41, 43, 42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 0, 0, 91, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 38, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 35, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 0, 0, 0, 0, 0, 63, 0, 0, 0, 0, 0, 59, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 163, 170, 0, 174, 103, 105, 112, 107, 162, 126, 116, 120, 0, 213, 67, 69, 65, 217, 218, 71,
++    101, 100, 88, 96, 76, 209, 84, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 48, 49, 51, 50,
++    55, 54, 52, 53, 0, 0, 94, 0, 56, 57, 94, 0, 95, 178, 186, 182, 202, 198, 190, 194, 229, 228, 232,
++    235, 203, 212, 231, 208, 0, 0, 0, 0, 0, 0, 0, 0, 234, 233, 0, 230, 0, 0, 0, 0, 0, 0, 221, 0, 223,
++    226, 220, 227, 211, 208, 205, 207, 222, 225, 206, 224, 188, 194, 191, 193, 195, 197, 192, 198, 212,
++    204, 200, 203, 196, 202, 199, 201, 122, 162, 127, 161, 163, 165, 241, 166, 171, 173, 168, 174, 164,
++    170, 167, 169, 187, 189, 184, 190, 180, 186, 183, 185, 172, 178, 175, 177, 179, 181, 176, 182, 0,
++    69, 67, 70, 71, 219, 68, 218, 76, 66, 215, 65, 72, 217, 214, 216, 85, 87, 82, 88, 78, 84, 81, 83,
++    75, 73, 209, 74, 77, 79, 210, 80, 121, 124, 118, 126, 114, 120, 117, 119, 108, 112, 109, 111, 113,
++    115, 110, 116, 86, 96, 89, 92, 97, 99, 90, 100, 107, 106, 104, 105, 98, 101, 103, 102, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 3, 0, 0, 2, 0, 0, 29, 0, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 4, 0, 0, 0, 0, 18, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 159, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 22, 0, 147, 0, 0, 0, 0, 0, 236, 237, 0, 240, 0, 0, 0, 0, 0, 0, 0, 146, 0, 0, 0, 21, 19, 20,
++    149, 5, 0, 0, 28, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 239, 0, 0, 0, 0, 0, 0, 31, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 138, 137, 157, 26, 0, 134, 136, 135, 0, 0, 145, 153, 0, 0, 144, 143, 139, 158,
++    142, 141, 0, 0, 0, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 150, 130, 128, 129, 0, 0, 0,
++    0, 0, 23, 0, 0, 0, 0, 148, 0, 0, 0, 0, 0, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 131, 133, 132, 0,
++    0, 151, 0, 0, 0, 156, 0, 154, 0, 0, 155, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 125, 123, 0, 0, 0, 0, 0, 0, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++    0, 0, 0, 0, 0, 0
++};
++
++uint32_t ass_font_charmap_arabic_traditional(uint32_t symbol)
++{
++    unsigned hash = symbol ^ symbol >> 1, index = hash & 1023, test = hash >> 9;
++    return test == ass_font_charmap_arabic_traditional_check[index] ?
++      61952 + ass_font_charmap_arabic_traditional_result[index] : symbol;
++}
+diff --git a/libass/ass_arabic_charmap.h b/libass/ass_arabic_charmap.h
+new file mode 100644
+index 0000000..4666c50
+--- /dev/null
++++ b/libass/ass_arabic_charmap.h
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (C) 2026
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++// WARNING - THIS FILE IS AUTO-GENERATED. DO NOT EDIT IT MANUALLY.
++// Regenerate with: python3 gen_arabic_charmap.py
++
++#ifndef LIBASS_ASS_ARABIC_CHARMAP_H
++#define LIBASS_ASS_ARABIC_CHARMAP_H
++
++#include <stdint.h>
++
++uint32_t ass_font_charmap_arabic_simplified(uint32_t symbol);
++uint32_t ass_font_charmap_arabic_traditional(uint32_t symbol);
++
++#endif /* LIBASS_ASS_ARABIC_CHARMAP_H */
+diff --git a/libass/ass_bitmap.c b/libass/ass_bitmap.c
+index 41df5e1..4182b45 100644
+--- a/libass/ass_bitmap.c
++++ b/libass/ass_bitmap.c
+@@ -147,7 +147,8 @@ bool ass_copy_bitmap(const BitmapEngine *engine, Bitmap *dst, const Bitmap *src)
+ }
+ 
+ bool ass_outline_to_bitmap(RenderContext *state, Bitmap *bm,
+-                           ASS_Outline *outline1, ASS_Outline *outline2)
++                           ASS_Outline *outline1, ASS_Outline *outline2,
++                           ASS_Rect *clip)
+ {
+     ASS_Renderer *render_priv = state->renderer;
+     RasterizerData *rst = &state->rasterizer;
+@@ -163,10 +164,23 @@ bool ass_outline_to_bitmap(RenderContext *state, Bitmap *bm,
+         return false;
+ 
+     // enlarge by 1/64th of pixel to bypass slow rasterizer path, add 1 pixel for shift_bitmap
+-    int32_t x_min = (rst->bbox.x_min -   1) >> 6;
+-    int32_t y_min = (rst->bbox.y_min -   1) >> 6;
+-    int32_t x_max = (rst->bbox.x_max + 127) >> 6;
+-    int32_t y_max = (rst->bbox.y_max + 127) >> 6;
++    int32_t x_min = (rst->bbox.x_min - 64) >> 6;
++    int32_t y_min = (rst->bbox.y_min - 64) >> 6;
++    int32_t x_max = (rst->bbox.x_max + 64) >> 6;
++    int32_t y_max = (rst->bbox.y_max + 64) >> 6;
++
++
++    if (clip) {
++        x_min = FFMAX(x_min, clip->x_min);
++        y_min = FFMAX(y_min, clip->y_min);
++        x_max = FFMIN(x_max, clip->x_max);
++        y_max = FFMIN(y_max, clip->y_max);
++
++        if (x_max <= x_min || y_max <= y_min) {
++            return false;
++        }
++    }
++
+     int32_t w = x_max - x_min;
+     int32_t h = y_max - y_min;
+ 
+@@ -224,37 +238,20 @@ void ass_fix_outline(Bitmap *bm_g, Bitmap *bm_o)
+ }
+ 
+ /**
+- * \brief Shift a bitmap by the fraction of a pixel in x and y direction
++ * \brief Shift a bitmap in x and y direction by amount
+  * expressed in 26.6 fixed point
+  */
+-void ass_shift_bitmap(Bitmap *bm, int shift_x, int shift_y)
++void ass_shift_bitmap(const BitmapEngine *engine, Bitmap *bm,
++                      int32_t shift_x, int32_t shift_y)
+ {
+-    assert((shift_x & ~63) == 0 && (shift_y & ~63) == 0);
+-
+-    if (!bm->buffer)
++    // Works right even for negative offsets
++    // '>>' rounds toward negative infinity, '&' returns correct remainder
++    bm->left -= -shift_x >> 6;
++    bm->top  -= -shift_y >> 6;
++    int x = -shift_x & 63;
++    int y = -shift_y & 63;
++    if (!bm->buffer || !(x | y))
+         return;
+ 
+-    int32_t w = bm->w, h = bm->h;
+-    ptrdiff_t s = bm->stride;
+-    uint8_t *buf = bm->buffer;
+-
+-    // Shift in x direction
+-    if (shift_x)
+-        for (int32_t y = 0; y < h; y++) {
+-            for (int32_t x = w - 1; x > 0; x--) {
+-                uint8_t b = buf[x + y * s - 1] * shift_x >> 6;
+-                buf[x + y * s - 1] -= b;
+-                buf[x + y * s] += b;
+-            }
+-        }
+-
+-    // Shift in y direction
+-    if (shift_y)
+-        for (int32_t x = 0; x < w; x++) {
+-            for (int32_t y = h - 1; y > 0; y--) {
+-                uint8_t b = buf[x + y * s - s] * shift_y >> 6;
+-                buf[x + y * s - s] -= b;
+-                buf[x + y * s] += b;
+-            }
+-        }
++    engine->shift(bm->buffer, bm->stride, bm->w, bm->h, x, y);
+ }
+diff --git a/libass/ass_bitmap.h b/libass/ass_bitmap.h
+index c337bf1..cf86543 100644
+--- a/libass/ass_bitmap.h
++++ b/libass/ass_bitmap.h
+@@ -42,13 +42,15 @@ void ass_free_bitmap(Bitmap *bm);
+ struct render_context;
+ 
+ bool ass_outline_to_bitmap(struct render_context *state, Bitmap *bm,
+-                           ASS_Outline *outline1, ASS_Outline *outline2);
++                           ASS_Outline *outline1, ASS_Outline *outline2,
++                           ASS_Rect *clip);
+ 
+ void ass_synth_blur(const BitmapEngine *engine, Bitmap *bm,
+                     int be, double blur_r2x, double blur_r2y);
+ 
++uint32_t ass_blur_padding(double r2);
+ bool ass_gaussian_blur(const BitmapEngine *engine, Bitmap *bm, double r2x, double r2y);
+-void ass_shift_bitmap(Bitmap *bm, int shift_x, int shift_y);
++void ass_shift_bitmap(const BitmapEngine *engine, Bitmap *bm, int32_t shift_x, int32_t shift_y);
+ void ass_fix_outline(Bitmap *bm_g, Bitmap *bm_o);
+ 
+ #endif                          /* LIBASS_BITMAP_H */
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 847adc4..e7cbdf3 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -47,6 +47,7 @@
+     BitmapBlendFunc ass_add_bitmaps_  ## suffix; \
+     BitmapBlendFunc ass_imul_bitmaps_ ## suffix; \
+     BitmapMulFunc   ass_mul_bitmaps_  ## suffix; \
++    ShiftFunc       ass_shift_        ## suffix; \
+     BeBlurFunc      ass_be_blur_      ## suffix;
+ 
+ #define GENERIC_FUNCTION(name, suffix) \
+@@ -56,6 +57,7 @@
+     GENERIC_FUNCTION(add_bitmaps,  suffix) \
+     GENERIC_FUNCTION(imul_bitmaps, suffix) \
+     GENERIC_FUNCTION(mul_bitmaps,  suffix) \
++    GENERIC_FUNCTION(shift,        suffix) \
+     GENERIC_FUNCTION(be_blur,      suffix)
+ 
+ 
+@@ -180,6 +182,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         if (flags & ASS_CPU_FLAG_X86_SSSE3) {
+             ALL_PROTOTYPES(16, ssse3)
+             RASTERIZER_FUNCTION(fill_generic, ssse3)
++            GENERIC_FUNCTION(shift, ssse3)
+             GENERIC_FUNCTION(be_blur, ssse3)
+             BLUR_FUNCTION(shrink_horz, 16, ssse3)
+             BLUR_FUNCTION(expand_horz, 16, ssse3)
+diff --git a/libass/ass_bitmap_engine.h b/libass/ass_bitmap_engine.h
+index 68d7aa8..a0958db 100644
+--- a/libass/ass_bitmap_engine.h
++++ b/libass/ass_bitmap_engine.h
+@@ -48,6 +48,8 @@ typedef void BitmapMulFunc(uint8_t *restrict dst, ptrdiff_t dst_stride,
+                            const uint8_t *restrict src2, ptrdiff_t src2_stride,
+                            size_t width, size_t height);
+ 
++typedef void ShiftFunc(uint8_t *restrict buf, ptrdiff_t stride,
++                       size_t width, size_t height, int shift_x, int shift_y);
+ typedef void BeBlurFunc(uint8_t *restrict buf, ptrdiff_t stride,
+                         size_t width, size_t height, uint16_t *restrict tmp);
+ 
+@@ -76,6 +78,9 @@ typedef struct {
+     BitmapBlendFunc *add_bitmaps, *imul_bitmaps;
+     BitmapMulFunc *mul_bitmaps;
+ 
++    // shift function
++    ShiftFunc *shift;
++
+     // be blur function
+     BeBlurFunc *be_blur;
+ 
+diff --git a/libass/ass_blur.c b/libass/ass_blur.c
+index ec91a92..5adb16a 100644
+--- a/libass/ass_blur.c
++++ b/libass/ass_blur.c
+@@ -145,26 +145,54 @@ typedef struct {
+     int16_t coeff[8];
+ } BlurMethod;
+ 
+-static void find_best_method(BlurMethod *blur, double r2)
++static void find_scale(BlurMethod *blur, double r2)
+ {
+-    double mu[8];
+     if (r2 < 0.5) {
+         blur->level = 0;
+         blur->radius = 4;
+-        mu[1] = 0.085 * r2 * r2 * r2;
+-        mu[0] = 0.5 * r2 - 4 * mu[1];
+-        mu[2] = mu[3] = 0;
+     } else {
+         double frac = frexp(sqrt(0.11569 * r2 + 0.20591047), &blur->level);
+         double mul = pow(0.25, blur->level);
+         blur->radius = 8 - (int) ((10.1525 + 0.8335 * mul) * (1 - frac));
+         blur->radius = FFMAX(blur->radius, 4);
++    }
++}
++
++static void find_best_method(BlurMethod *blur, double r2)
++{
++    find_scale(blur, r2);
++
++    double mu[8];
++    if (r2 < 0.5) {
++        mu[1] = 0.085 * r2 * r2 * r2;
++        mu[0] = 0.5 * r2 - 4 * mu[1];
++        mu[2] = mu[3] = 0;
++    } else {
++        double mul = pow(0.25, blur->level);
+         calc_coeff(mu, blur->radius, r2, mul);
+     }
++
+     for (int i = 0; i < blur->radius; i++)
+         blur->coeff[i] = (int) (0x10000 * mu[i] + 0.5);
+ }
+ 
++static int blur_offset(const BlurMethod *blur)
++{
++    return ((2 * blur->radius + 9) << blur->level) - 5;
++}
++
++static uint32_t blurred_dim(uint32_t d, const BlurMethod *blur)
++{
++    return ((d + blur_offset(blur)) & ~((1 << blur->level) - 1)) - 4;
++}
++
++uint32_t ass_blur_padding(double r2)
++{
++    BlurMethod blur;
++    find_scale(&blur, r2);
++    return (blur_offset(&blur) + 1) / 2;
++}
++
+ /**
+  * \brief Perform approximate gaussian blur
+  * \param r2x in: desired standard deviation along X axis squared
+@@ -179,10 +207,8 @@ bool ass_gaussian_blur(const BitmapEngine *engine, Bitmap *bm, double r2x, doubl
+     else find_best_method(&blur_y, r2y);
+ 
+     uint32_t w = bm->w, h = bm->h;
+-    int offset_x = ((2 * blur_x.radius + 9) << blur_x.level) - 5;
+-    int offset_y = ((2 * blur_y.radius + 9) << blur_y.level) - 5;
+-    uint32_t end_w = ((w + offset_x) & ~((1 << blur_x.level) - 1)) - 4;
+-    uint32_t end_h = ((h + offset_y) & ~((1 << blur_y.level) - 1)) - 4;
++    uint32_t end_w = blurred_dim(w, &blur_x);
++    uint32_t end_h = blurred_dim(h, &blur_y);
+ 
+     const int stripe_width = 1 << (engine->align_order - 1);
+     uint64_t size = (((uint64_t) end_w + stripe_width - 1) & ~(stripe_width - 1)) * end_h;
+diff --git a/libass/ass_cache_template.h b/libass/ass_cache_template.h
+index 84d6f4c..f9c928a 100644
+--- a/libass/ass_cache_template.h
++++ b/libass/ass_cache_template.h
+@@ -8,6 +8,8 @@
+         ASS_StringView member;
+ #define VECTOR(member) \
+         ASS_Vector member;
++#define RECT(member) \
++        ASS_Rect member;
+ #define END(typedefnamename) \
+     } typedefnamename;
+ 
+@@ -25,6 +27,10 @@
+             ass_string_equal(a->member, b->member) &&
+ #define VECTOR(member) \
+             a->member.x == b->member.x && a->member.y == b->member.y &&
++#define RECT(member) \
++            a->member.x_min == b->member.x_min && a->member.y_min == b->member.y_min && \
++            a->member.x_max == b->member.x_max && a->member.y_max == b->member.y_max &&
++
+ #define END(typedefname) \
+             true; \
+     }
+@@ -40,6 +46,9 @@
+ #define STRING(member) \
+         hval = ass_hash_buf(p->member.str, p->member.len, hval);
+ #define VECTOR(member) GENERIC(, member.x); GENERIC(, member.y);
++#define RECT(member) \
++        GENERIC(, member.x_min); GENERIC(, member.y_min); \
++        GENERIC(, member.x_max); GENERIC(, member.y_max);
+ #define END(typedefname) \
+         return hval; \
+     }
+@@ -66,6 +75,8 @@ START(bitmap, bitmap_hash_key)
+     VECTOR(matrix_x)
+     VECTOR(matrix_y)
+     VECTOR(matrix_z)
++    // clip region
++    RECT(clip)
+ END(BitmapHashKey)
+ 
+ // font is refed when inserted and unrefed when dropped
+@@ -135,4 +146,5 @@ END(BitmapRef)
+ #undef GENERIC
+ #undef STRING
+ #undef VECTOR
++#undef RECT
+ #undef END
+diff --git a/libass/ass_compat.h b/libass/ass_compat.h
+index cdb58ce..8a44ff2 100644
+--- a/libass/ass_compat.h
++++ b/libass/ass_compat.h
+@@ -30,6 +30,14 @@
+ #define inline __inline
+ #endif
+ 
++#ifndef __has_builtin
++#define __has_builtin(...) 0
++#endif
++
++#ifndef __has_attribute
++#define __has_attribute(...) 0
++#endif
++
+ // Work around build failures on Windows with static FriBidi.
+ // Possible because we only use FriBidi functions, not objects.
+ #if defined(_WIN32) && !defined(FRIBIDI_LIB_STATIC)
+diff --git a/libass/ass_font.c b/libass/ass_font.c
+index 312fee2..aa12ca1 100644
+--- a/libass/ass_font.c
++++ b/libass/ass_font.c
+@@ -259,8 +259,20 @@ uint32_t ass_font_index_magic(FT_Face face, uint32_t symbol)
+ 
+     if (face->charmap->platform_id == TT_PLATFORM_MICROSOFT) {
+         switch (face->charmap->encoding) {
+-        case FT_ENCODING_MS_SYMBOL:
++        case FT_ENCODING_MS_SYMBOL: {
++            TT_OS2 *os2 = FT_Get_Sfnt_Table(face, FT_SFNT_OS2);
++            if (os2) {
++                // See: https://learn.microsoft.com/en-us/typography/legacy/legacy_arabic_fonts
++                int ARABIC_CHARSET_SIMPLIFIED  = 178;
++                int ARABIC_CHARSET_TRADITIONAL = 179;
++                uint8_t charset = (os2->fsSelection >> 8) & 0xFF;
++                if (charset == ARABIC_CHARSET_SIMPLIFIED)
++                    return ass_font_charmap_arabic_simplified(symbol);
++                if (charset == ARABIC_CHARSET_TRADITIONAL)
++                    return ass_font_charmap_arabic_traditional(symbol);
++            }
+             return 0xF000 | symbol;
++        }
+         case FT_ENCODING_MS_SJIS:
+         case FT_ENCODING_MS_GB2312:
+         case FT_ENCODING_MS_BIG5:
+diff --git a/libass/ass_font.h b/libass/ass_font.h
+index 53ba8ea..2388249 100644
+--- a/libass/ass_font.h
++++ b/libass/ass_font.h
+@@ -30,6 +30,7 @@ typedef struct ass_font ASS_Font;
+ #include "ass_fontselect.h"
+ #include "ass_cache.h"
+ #include "ass_outline.h"
++#include "ass_arabic_charmap.h"
+ 
+ #define VERTICAL_LOWER_BOUND 0x02f1
+ 
+diff --git a/libass/ass_fontconfig.c b/libass/ass_fontconfig.c
+index 6624a80..0e6930b 100644
+--- a/libass/ass_fontconfig.c
++++ b/libass/ass_fontconfig.c
+@@ -100,7 +100,11 @@ static bool scan_fonts(FcConfig *config, ASS_FontProvider *provider)
+     if (!pat)
+         return false;
+ 
++#if FC_VERSION >= 21700
++    FcConfigSetDefaultSubstitute(config, pat);
++#else
+     FcDefaultSubstitute(pat);
++#endif
+     FcResult res;
+     // trim=FcFalse returns all system fonts
+     fonts = FcFontSort(config, pat, FcFalse, NULL, &res);
+@@ -229,8 +233,12 @@ static void cache_fallbacks(ProviderPrivate *fc)
+         return;
+     FcPatternAddString(pat, FC_FAMILY, (FcChar8 *)"sans-serif");
+     FcPatternAddBool(pat, FC_OUTLINE, FcTrue);
+-    FcConfigSubstitute (fc->config, pat, FcMatchPattern);
+-    FcDefaultSubstitute (pat);
++    FcConfigSubstitute(fc->config, pat, FcMatchPattern);
++#if FC_VERSION >= 21700
++    FcConfigSetDefaultSubstitute(fc->config, pat);
++#else
++    FcDefaultSubstitute(pat);
++#endif
+ 
+     // FC_LANG is automatically set according to locale, but this results
+     // in strange sorting sometimes, so remove the attribute completely.
+diff --git a/libass/ass_metrics.h b/libass/ass_metrics.h
+new file mode 100644
+index 0000000..d2cf3b0
+--- /dev/null
++++ b/libass/ass_metrics.h
+@@ -0,0 +1,116 @@
++/*
++ * Copyright (C) 2024 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#ifndef LIBASS_METRICS_H
++#define LIBASS_METRICS_H
++
++#include <stdio.h>
++
++#include "ass_types.h"
++
++/*
++ * API to obtain text metrics and shape data for subtitles.
++ * This API is intended to ease the authoring of subtitles by providing
++ * a unified and platform-independent method to obtain metrics.
++ * However, there are no guarantees for the stability of the data returned by
++ * this API. With future changes to libass and its rendering, the returned
++ * metrics and shape data may change too.
++ *
++ * For example, subtitle authors could use this API to determine when and
++ * where libass automatically breaks a subtitle line into two, but there is
++ * no guarantee that newer or older versions of libass (as well as other
++ * renderers) will always break this line in the same way. Subtitle authors
++ * that want to ensure that a line is broken in a certain way should instead
++ * use manual line breaks and overrides (e.g. \q2).
++ *
++ * API Usage:
++ * After initializing and configuring an ASS_Renderer and ASS_Track in the
++ * same way as one would for normal subtitle rendering, users may call
++ * ass_get_metrics to obtain metrics for all events rendered at the given
++ * point in time.
++ * This returns a list of event metrics, each of which consisting of a list
++ * of runs, with metrics for those runs. A run contains lists of shapes
++ * which, when drawn together, make up the shape for the fill or border of
++ * the run.
++ * The individual shapes correspond to individual glyphs rendered in the run,
++ * but due to font shaping there is no guarantee for these glyphs to
++ * correspond one-to-one to characters in the run's text.
++ */
++
++
++/*
++ * An outline is represented by an array of points and an array of segments.
++ * Segments can be splines of order 1 (line), 2 (quadratic) or 3 (cubic).
++ * Each segment owns a number of points equal to its order in the point array
++ * and uses the first point owned by the next segment as its last point.
++ * The last segment in each contour uses the first point owned by the first
++ * segment in each contour as its last point.
++ * Correspondingly, the total number of points is equal to the sum of the
++ * spline orders of all segments.
++ */
++
++enum {
++    ASS_METRICS_OUTLINE_LINE_SEGMENT     = 1,  // line segment
++    ASS_METRICS_OUTLINE_QUADRATIC_SPLINE = 2,  // quadratic spline
++    ASS_METRICS_OUTLINE_CUBIC_SPLINE     = 3,  // cubic spline
++    ASS_METRICS_OUTLINE_COUNT_MASK       = 3,  // spline order mask
++    ASS_METRICS_OUTLINE_CONTOUR_END      = 4   // last segment in contour flag
++};
++
++typedef struct ass_metrics_outline {
++    size_t n_points;
++    size_t n_segments;
++    ASS_DVector *points;
++    char *segments;
++
++    struct ass_metrics_outline *next;   // Next outline, or NULL
++} ASS_Metrics_Outline;
++
++/* ASS_RunMetrics is a set of metrics and shape data corresponding to a single run. */
++typedef struct ass_run_metrics {
++    ASS_DVector pos;
++    ASS_DVector advance;
++    double asc;
++    double desc;
++    // TODO: Add more fields here?
++
++    ASS_Metrics_Outline *fill;
++    ASS_Metrics_Outline *border;
++
++    struct ass_run_metrics *next;    // Next run, or NULL
++} ASS_RunMetrics;
++
++/* ASS_Metrics is a set of metrics corresponding to a single event. */
++typedef struct ass_metrics {
++    ASS_Event *event;   // Becomes invalid once the containing ASS_Track is modified, pruned, or freed
++    ASS_RunMetrics *runs;
++    struct ass_metrics *next;   // Next set of metrics, or NULL
++} ASS_Metrics;
++
++/**
++ * \brief Get metrics for a frame, producing a list of ASS_Metrics.
++ * The metrics returned live until the next call to ass_get_metrics, ass_render_frame,
++ * or ass_renderer_done.
++ *
++ * \param priv renderer handle
++ * \param track subtitle track
++ * \param now video timestamp in milliseconds
++ */
++ASS_Metrics *ass_get_metrics(ASS_Renderer *priv, ASS_Track *track, long long now);
++
++#endif /* LIBASS_METRICS_H */
+diff --git a/libass/ass_outline.c b/libass/ass_outline.c
+index cf9575d..aa1fe82 100644
+--- a/libass/ass_outline.c
++++ b/libass/ass_outline.c
+@@ -77,6 +77,48 @@ void ass_outline_free(ASS_Outline *outline)
+ }
+ 
+ 
++/*
++ * \brief Allocate an ASS_Metrics_Outline's memory and copy the given
++ * ASS_Outline's data into it.
++ */
++void ass_metric_outline_copy(ASS_Metrics_Outline *metrics_outline, ASS_Outline *outline)
++{
++    metrics_outline->n_points = outline->n_points;
++    metrics_outline->n_segments = outline->n_segments;
++    metrics_outline->points = malloc(sizeof(ASS_DVector) * outline->n_points);
++    metrics_outline->segments = malloc(outline->n_segments);
++    if (!metrics_outline->points || !metrics_outline->segments) {
++        free(metrics_outline->points);
++        free(metrics_outline->segments);
++        metrics_outline->n_points = 0;
++        metrics_outline->n_segments = 0;
++        return;
++    }
++
++    memcpy(metrics_outline->segments, outline->segments, outline->n_segments);
++
++    for (int i = 0; i < outline->n_points; i++) {
++        metrics_outline->points[i].x = d6_to_double(outline->points[i].x);
++        metrics_outline->points[i].y = d6_to_double(outline->points[i].y);
++    }
++}
++
++/*
++ * \brief Free the point and segments lists of an ASS_Metrics_Outline
++ */
++void ass_metric_outline_free(ASS_Metrics_Outline *metrics_outline)
++{
++    if (!metrics_outline)
++        return;
++
++    free(metrics_outline->points);
++    free(metrics_outline->segments);
++    metrics_outline->points = NULL;
++    metrics_outline->segments = NULL;
++    metrics_outline->n_points = 0;
++    metrics_outline->n_segments = 0;
++}
++
+ static bool valid_point(const FT_Vector *pt)
+ {
+     return labs(pt->x) <= OUTLINE_MAX && labs(pt->y) <= OUTLINE_MAX;
+@@ -476,7 +518,7 @@ void ass_outline_update_min_transformed_x(const ASS_Outline *outline,
+     for (size_t i = 0; i < outline->n_points; i++) {
+         double z = m[2][0] * pt[i].x + m[2][1] * pt[i].y + m[2][2];
+         double x = (m[0][0] * pt[i].x + m[0][1] * pt[i].y + m[0][2]) / FFMAX(z, 0.1);
+-        if (isnan(x))
++        if (ass_isnan(x))
+             continue;
+         int32_t ix = ass_lrint(FFMINMAX(x, -OUTLINE_MAX, OUTLINE_MAX));
+         *min_x = FFMIN(*min_x, ix);
+diff --git a/libass/ass_outline.h b/libass/ass_outline.h
+index 25848b5..0ec7549 100644
+--- a/libass/ass_outline.h
++++ b/libass/ass_outline.h
+@@ -24,6 +24,7 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ 
++#include "ass_metrics.h"
+ #include "ass_utils.h"
+ 
+ 
+@@ -31,10 +32,6 @@ typedef struct {
+     int32_t x, y;
+ } ASS_Vector;
+ 
+-typedef struct {
+-    double x, y;
+-} ASS_DVector;
+-
+ typedef struct {
+     int32_t x_min, y_min, x_max, y_max;
+ } ASS_Rect;
+@@ -91,6 +88,9 @@ void ass_outline_clear(ASS_Outline *outline);
+ bool ass_outline_alloc(ASS_Outline *outline, size_t n_points, size_t n_segments);
+ void ass_outline_free(ASS_Outline *outline);
+ 
++void ass_metric_outline_copy(ASS_Metrics_Outline *metrics_outline, ASS_Outline *outline);
++void ass_metric_outline_free(ASS_Metrics_Outline *metrics_outline);
++
+ // expects preallocated outline and works inplace
+ bool ass_outline_convert(ASS_Outline *outline, const FT_Outline *source);
+ void ass_outline_add_rect(ASS_Outline *outline,
+diff --git a/libass/ass_parse.c b/libass/ass_parse.c
+index b1f5cb9..99833c5 100644
+--- a/libass/ass_parse.c
++++ b/libass/ass_parse.c
+@@ -120,7 +120,7 @@ void ass_update_font(RenderContext *state)
+  */
+ static inline int32_t dtoi32(double val)
+ {
+-    if (isnan(val) || val <= INT32_MIN || val >= INT32_MAX + 1LL)
++    if (ass_isnan(val) || val <= INT32_MIN || val >= INT32_MAX + 1LL)
+         return INT32_MIN;
+     return val;
+ }
+@@ -219,7 +219,7 @@ static bool parse_vector_clip(RenderContext *state,
+ 
+     int scale = 1;
+     if (nargs == 2)
+-        scale = argtoi32(args[0]);
++        scale = FFMAX(argtoi32(args[0]), 1);
+ 
+     struct arg text = args[nargs - 1];
+     state->clip_drawing_text.str = text.start;
+@@ -966,6 +966,8 @@ void ass_apply_transition_effects(RenderContext *state)
+         delay = ((int) FFMAX(delay / scale_x, 1)) * scale_x;
+         state->scroll_shift =
+             (render_priv->time - event->Start) / delay;
++        state->scroll_fade_width =
++            cnt >= 3 ? ((int) (v[2] * scale_x)) / scale_x : 0;
+         state->evt_type |= EVENT_HSCROLL;
+         state->detect_collisions = 0;
+         state->wrap_style = 2;
+@@ -1005,6 +1007,8 @@ void ass_apply_transition_effects(RenderContext *state)
+         }
+         state->scroll_y0 = y0;
+         state->scroll_y1 = y1;
++        state->scroll_fade_width =
++            cnt >= 4 ? ((int) (v[3] * scale_y)) / scale_y : 0;
+         state->evt_type |= EVENT_VSCROLL;
+         state->detect_collisions = 0;
+     }
+diff --git a/libass/ass_rasterizer.c b/libass/ass_rasterizer.c
+index 0ac45d1..a0c958e 100644
+--- a/libass/ass_rasterizer.c
++++ b/libass/ass_rasterizer.c
+@@ -33,10 +33,10 @@
+ 
+ static inline int ilog2(uint32_t n)
+ {
+-#ifdef __GNUC__
++#if defined(__GNUC__) || defined(__clang__)
+     return __builtin_clz(n) ^ 31;
+ #elif defined(_MSC_VER)
+-    int res;
++    unsigned long res;
+     _BitScanReverse(&res, n);
+     return res;
+ #else
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index 68b11fe..457e92c 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -29,17 +29,18 @@
+ #endif
+ 
+ #include "ass.h"
++#include "ass_metrics.h"
+ #include "ass_outline.h"
+ #include "ass_render.h"
+ #include "ass_parse.h"
+ #include "ass_priv.h"
+ #include "ass_shaper.h"
++#include "ass_utils.h"
+ 
+ #define MAX_GLYPHS_INITIAL 1024
+ #define MAX_LINES_INITIAL 64
+ #define MAX_BITMAPS_INITIAL 16
+ #define MAX_SUB_BITMAPS_INITIAL 64
+-#define SUBPIXEL_MASK 63
+ #define STROKER_PRECISION 16     // stroker error in integer units, unrelated to final accuracy
+ #define RASTERIZER_PRECISION 16  // rasterizer spline approximation error in 1/64 pixel units
+ #define POSITION_PRECISION 8.0   // rough estimate of transform error in 1/64 pixel units
+@@ -177,6 +178,7 @@ void ass_renderer_done(ASS_Renderer *render_priv)
+     if (!render_priv)
+         return;
+ 
++    ass_free_metrics(render_priv);
+     ass_frame_unref(render_priv->images_root);
+     ass_frame_unref(render_priv->prev_images_root);
+ 
+@@ -235,6 +237,20 @@ static ASS_Image *my_draw_bitmap(unsigned char *bitmap, int bitmap_w,
+     return &img->result;
+ }
+ 
++static inline ASS_Image *ass_image_borrow_copy(const ASS_Image *img)
++{
++    ASS_Image *nimg = my_draw_bitmap(img->bitmap, img->w, img->h, img->stride,
++                                     img->dst_x, img->dst_y, img->color,
++                                     ((ASS_ImagePriv *) img)->source);
++    if (!nimg)
++        return NULL;
++    nimg->next = img->next;
++    nimg->type = img->type;
++    // Borrow the buffer from the original ASS_Image
++    ((ASS_ImagePriv *) nimg)->buffer = NULL;
++    return nimg;
++}
++
+ /**
+  * \brief Mapping between script and screen coordinates
+  */
+@@ -497,6 +513,7 @@ render_glyph(RenderContext *state, Bitmap *bm, int dst_x, int dst_y,
+ 
+ static bool quantize_transform(double m[3][3], ASS_Vector *pos,
+                                ASS_DVector *offset, bool first,
++                               ASS_Rect *clip,
+                                BitmapHashKey *key)
+ {
+     // Full transform:
+@@ -645,6 +662,33 @@ static bool quantize_transform(double m[3][3], ASS_Vector *pos,
+     key->matrix_x.x = qm[0][0];  key->matrix_x.y = qm[0][1];
+     key->matrix_y.x = qm[1][0];  key->matrix_y.y = qm[1][1];
+     key->matrix_z.x = qm[2][0];  key->matrix_z.y = qm[2][1];
++
++    if (clip && !(
++        ((qr[0] + key->outline->cbox.x_min) < (int64_t)((uint64_t)clip->x_min << SUBPIXEL_ORDER)) ||
++        ((qr[1] + key->outline->cbox.y_min) < (int64_t)((uint64_t)clip->y_min << SUBPIXEL_ORDER)) ||
++        ((qr[0] + key->outline->cbox.x_max) > (int64_t)((uint64_t)clip->x_max << SUBPIXEL_ORDER)) ||
++        ((qr[1] + key->outline->cbox.y_max) > (int64_t)((uint64_t)clip->y_max << SUBPIXEL_ORDER))
++    ))
++        clip = NULL;
++
++#define CLIP_PRECISION 64
++#define CLIP_PRECISION_MASK (~(CLIP_PRECISION - 1))
++#define CLIP_MIN(x) ((x) & CLIP_PRECISION_MASK)
++#define CLIP_MAX(x) (((x) + CLIP_PRECISION) & CLIP_PRECISION_MASK)
++    if (clip) {
++        key->clip = (ASS_Rect){
++            CLIP_MIN(clip->x_min - pos->x),
++            CLIP_MIN(clip->y_min - pos->y),
++            CLIP_MAX(clip->x_max - pos->x),
++            CLIP_MAX(clip->y_max - pos->y),
++        };
++    } else {
++        key->clip = (ASS_Rect){
++            INT32_MIN, INT32_MIN,
++            INT32_MAX, INT32_MAX,
++        };
++    }
++
+     return true;
+ }
+ 
+@@ -692,6 +736,135 @@ static inline size_t bitmap_size(const Bitmap *bm)
+     return bm->stride * bm->h;
+ }
+ 
++static void apply_hscroll_fade(RenderContext *state, ASS_Image *head)
++{
++    double fade_width = state->scroll_fade_width * state->screen_scale_x;
++    if (fade_width <= 0)
++        return;
++
++    ASS_Renderer *render_priv = state->renderer;
++
++    for (ASS_Image *cur = head; cur; cur = cur->next) {
++        int event_start = cur->dst_x - render_priv->settings.left_margin;
++        int event_end = event_start + cur->w;
++
++        double leading_fade_start = 0.5 * state->blur_scale_x - 0.5;
++        int leading_fade_start_int = floor(leading_fade_start) + 1;
++        double leading_fade_end = leading_fade_start + fade_width;
++        int leading_fade_end_int = ceil(leading_fade_end);
++
++        // int trailing_fade_end_int = render_priv->frame_content_width;
++        // double trailing_fade_end = trailing_fade_end_int + leading_fade_start;
++        double trailing_fade_end = render_priv->frame_content_width + leading_fade_start;
++        int trailing_fade_end_int = ceil(trailing_fade_end);
++        double trailing_fade_start = trailing_fade_end - fade_width;
++        int trailing_fade_start_int = floor(trailing_fade_start) + 1;
++
++        int full_a = _a(cur->color);
++        cur->color |= 0xFF;  // starts out fully transparent
++
++        for (int x = FFMAX(event_start, leading_fade_start_int); x < event_end && x <= trailing_fade_end_int; ) {
++            double exact_a = 0xFF - full_a;
++            if (x < leading_fade_end_int)
++                exact_a *= (x - leading_fade_start) / fade_width;
++            if (x >= trailing_fade_start_int)
++                exact_a *= FFMAX(trailing_fade_end - x, 0) / fade_width;
++
++            int a = 0xFF - lround(exact_a);
++            if (a != _a(cur->color)) {
++                if (x > event_start) {
++                    ASS_Image *nimg = ass_image_borrow_copy(cur);
++                    nimg->dst_x = x + render_priv->settings.left_margin;
++                    cur->w = nimg->dst_x - cur->dst_x;
++                    nimg->w -= cur->w;
++                    nimg->bitmap += cur->w;
++                    cur->next = nimg;
++                    cur = nimg;
++                }
++                cur->color = (cur->color & ~0xFF) | a;
++            }
++
++            if (x >= leading_fade_end_int && x < trailing_fade_start_int)
++                x = trailing_fade_start_int;
++            else
++                x++;
++        }
++    }
++}
++
++static void apply_vscroll_fade(RenderContext *state, ASS_Image *head)
++{
++    double fade_height = state->scroll_fade_width * state->screen_scale_y;
++    if (fade_height <= 0)
++        return;
++
++    ASS_Renderer *render_priv = state->renderer;
++
++    for (ASS_Image *cur = head; cur; cur = cur->next) {
++        int event_start = cur->dst_y - render_priv->settings.top_margin;
++        int event_end = event_start + cur->h;
++
++        ASS_Vector layout_res = ass_layout_res(render_priv);
++        double scale_y = ((double) layout_res.y) / render_priv->track->PlayResY;
++        double half_pixel = 0.5 * state->blur_scale_y - 0.5;
++
++        double leading_fade_start =
++            ((int32_t) (state->scroll_y0 * scale_y * 8) >> 3) * state->blur_scale_y + half_pixel;
++        int leading_fade_start_int = floor(leading_fade_start) + 1;
++        double leading_fade_end = leading_fade_start + fade_height;
++        int leading_fade_end_int = ceil(leading_fade_end);
++
++        double trailing_fade_end =
++            ((int32_t) (state->scroll_y1 * scale_y * 8) >> 3) * state->blur_scale_y + half_pixel;
++        int trailing_fade_end_int = ceil(trailing_fade_end);
++        double trailing_fade_start = trailing_fade_end - fade_height;
++        int trailing_fade_start_int = floor(trailing_fade_start) + 1;
++
++        int full_a = _a(cur->color);
++        cur->color |= 0xFF;  // starts out fully transparent
++
++        for (int y = FFMAX(event_start, leading_fade_start_int); y < event_end && y <= trailing_fade_end_int; ) {
++            double exact_a = 0xFF - full_a;
++            if (y < leading_fade_end_int)
++                exact_a *= (y - leading_fade_start) / fade_height;
++            if (y >= trailing_fade_start_int)
++                exact_a *= FFMAX(trailing_fade_end - y, 0) / fade_height;
++
++            int a = 0xFF - lround(exact_a);
++            if (a != _a(cur->color)) {
++                if (y > event_start) {
++                    ASS_Image *nimg = ass_image_borrow_copy(cur);
++                    nimg->dst_y = y + render_priv->settings.top_margin;
++                    cur->h = nimg->dst_y - cur->dst_y;
++                    nimg->h -= cur->h;
++                    nimg->bitmap += cur->h * cur->stride;
++                    cur->next = nimg;
++                    cur = nimg;
++                }
++                cur->color = (cur->color & ~0xFF) | a;
++            }
++
++            if (y >= leading_fade_end_int && y < trailing_fade_start_int)
++                y = trailing_fade_start_int;
++            else
++                y++;
++        }
++    }
++}
++
++/**
++ * Iterate through a list of bitmaps and apply the fade gradient
++ * from a Banner or Scroll effect, if applicable. Each image is
++ * replaced by multiple cropped copies with different alphas.
++ */
++static void apply_scroll_fade(RenderContext *state, ASS_Image *head)
++{
++    if (state->evt_type & EVENT_HSCROLL)
++        apply_hscroll_fade(state, head);
++    else if (state->evt_type & EVENT_VSCROLL)
++        apply_vscroll_fade(state, head);
++}
++
+ /**
+  * Iterate through a list of bitmaps and blend with clip vector, if
+  * applicable. The blended bitmaps are added to a free list which is freed
+@@ -718,11 +891,18 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
+     m[0][2] = int_to_d6(render_priv->settings.left_margin);
+     m[1][2] = int_to_d6(render_priv->settings.top_margin);
+ 
++    ASS_Rect clip = (ASS_Rect){
++        0,
++        0,
++        render_priv->settings.frame_width,
++        render_priv->settings.frame_height,
++    };
++
+     ASS_Vector pos;
+     BitmapHashKey key;
+     key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
+     if (!key.outline || !key.outline->valid ||
+-            !quantize_transform(m, &pos, NULL, true, &key))
++            !quantize_transform(m, &pos, NULL, true, &clip, &key))
+         return;
+ 
+     Bitmap *clip_bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
+@@ -879,6 +1059,7 @@ static ASS_Image *render_text(RenderContext *state)
+ 
+     *tail = 0;
+     blend_vector_clip(state, head);
++    apply_scroll_fade(state, head);
+ 
+     return head;
+ }
+@@ -958,7 +1139,6 @@ static ASS_Style *handle_selective_style_overrides(RenderContext *state,
+ 
+     if (requested & ASS_OVERRIDE_BIT_FONT_NAME) {
+         new->FontName = user->FontName;
+-        new->treat_fontname_as_pattern = user->treat_fontname_as_pattern;
+     }
+ 
+     if (requested & ASS_OVERRIDE_BIT_COLORS) {
+@@ -993,9 +1173,13 @@ static ASS_Style *handle_selective_style_overrides(RenderContext *state,
+     if (requested & ASS_OVERRIDE_BIT_MARGINS) {
+         new->MarginL = user->MarginL;
+         new->MarginR = user->MarginR;
+-        new->MarginV = user->MarginV;
++        new->MarginT = user->MarginT;
++        new->MarginB = user->MarginB;
+     }
+ 
++    // Never override RelativeTo; there are separate mechanisms for that
++    new->RelativeTo = rstyle->RelativeTo;
++
+     if (!new->FontName)
+         new->FontName = rstyle->FontName;
+ 
+@@ -1089,7 +1273,6 @@ void ass_reset_render_context(RenderContext *state, ASS_Style *style)
+ 
+     state->family.str = style->FontName;
+     state->family.len = strlen(style->FontName);
+-    state->treat_family_as_pattern = style->treat_fontname_as_pattern;
+     state->bold = style->Bold;
+     state->italic = style->Italic;
+     ass_update_font(state);
+@@ -1118,6 +1301,10 @@ init_render_context(RenderContext *state, ASS_Event *event)
+ {
+     ASS_Renderer *render_priv = state->renderer;
+ 
++    state->collect_metrics = false;
++    state->run_metrics = NULL;
++    state->current_run_metrics = NULL;
++
+     state->event = event;
+     state->parsed_tags = 0;
+     state->evt_type = EVENT_NORMAL;
+@@ -1372,6 +1559,35 @@ static void calc_transform_matrix(RenderContext *state,
+     }
+ }
+ 
++static void metrics_append_outline(RenderContext *state, ASS_Metrics_Outline **metrics_outline, BitmapHashKey *key, ASS_Vector *shift)
++{
++    if (!state->collect_metrics)
++        return;
++
++    while (*metrics_outline)
++        metrics_outline = &(**metrics_outline).next;
++
++    *metrics_outline = calloc(1, sizeof(ASS_Metrics_Outline));
++    if (!*metrics_outline)
++        return;
++
++    ASS_Metrics_Outline *result = *metrics_outline;
++
++    ASS_Outline outline[2];
++    ass_outline_apply_transform(outline, key);
++    ass_metric_outline_copy(result, &outline[0]);
++
++    ass_outline_free(&outline[0]);
++    ass_outline_free(&outline[1]);
++
++    for (int i = 0; i < result->n_points; i++) {
++        result->points[i].x += shift->x - state->current_run_metrics->pos.x;
++        result->points[i].y += shift->y - state->current_run_metrics->pos.y;
++    }
++}
++
++int ass_be_padding(int be);
++
+ /**
+  * \brief Get bitmaps for a glyph
+  * \param info glyph info
+@@ -1404,11 +1620,68 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+     if (info->effect_type == EF_KARAOKE_KF)
+         ass_outline_update_min_transformed_x(&info->outline->outline[0], m, leftmost_x);
+ 
++    ASS_Rect clip_rect = {
++        0,
++        0,
++        render_priv->settings.frame_width,
++        render_priv->settings.frame_height,
++    };
++
++#ifdef USE_RECT_CLIP
++    if (!state->clip_mode) {
++        clip_rect = (ASS_Rect){
++            state->clip_x0,
++            state->clip_y0,
++            state->clip_x1,
++            state->clip_y1,
++        };
++    }
++#endif
++
++    bool potentially_clipped = (
++        info->pos.x + info->outline->cbox.x_min < clip_rect.x_min << SUBPIXEL_ORDER ||
++        info->pos.y + info->outline->cbox.y_min < clip_rect.y_min << SUBPIXEL_ORDER ||
++        info->pos.x + info->outline->cbox.x_max > clip_rect.x_max << SUBPIXEL_ORDER ||
++        info->pos.y + info->outline->cbox.y_max > clip_rect.y_max << SUBPIXEL_ORDER
++    );
++
++    if (potentially_clipped) {
++        double blur_radius_scale = 2 / sqrt(log(256));
++        double blur_scale_x = state->blur_scale_x * blur_radius_scale;
++        double blur_scale_y = state->blur_scale_y * blur_radius_scale;
++        double blur_x = info->blur * blur_scale_x;
++        double blur_y = info->blur * blur_scale_y;
++
++        uint32_t xpad = ass_blur_padding(blur_x) + ass_be_padding(info->be);
++        uint32_t ypad = ass_blur_padding(blur_y) + ass_be_padding(info->be);
++
++        clip_rect.x_min -= xpad;
++        clip_rect.y_min -= ypad;
++        clip_rect.x_max += xpad;
++        clip_rect.y_max += ypad;
++
++        int32_t shadow_x = double_to_d6(info->shadow_x * state->border_scale_x);
++        int32_t shadow_y = double_to_d6(info->shadow_y * state->border_scale_y);
++
++        if (shadow_x > 0)
++            clip_rect.x_min -= (shadow_x + 63) >> 6;
++        else
++            clip_rect.x_max -= (shadow_x - 63) >> 6;
++        if (shadow_y > 0)
++            clip_rect.y_min -= (shadow_y + 63) >> 6;
++        else
++            clip_rect.y_max -= (shadow_y - 63) >> 6;
++    }
++
+     BitmapHashKey key;
+     key.outline = info->outline;
+-    if (!quantize_transform(m, pos, offset, first, &key))
++    if (!quantize_transform(m, pos, offset, first, potentially_clipped ? &clip_rect : NULL, &key))
+         return;
+ 
++    if (state->collect_metrics) {
++        metrics_append_outline(state, &state->current_run_metrics->fill, &key, pos);
++    }
++
+     info->bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
+     if (!info->bm || !info->bm->buffer)
+         info->bm = NULL;
+@@ -1530,9 +1803,13 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+ 
+     key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
+     if (!key.outline || !key.outline->valid ||
+-            !quantize_transform(m, pos_o, offset, false, &key))
++            !quantize_transform(m, pos_o, offset, false, potentially_clipped ? &clip_rect : NULL, &key))
+         return;
+ 
++    if (state->collect_metrics) {
++        metrics_append_outline(state, &state->current_run_metrics->border, &key, pos_o);
++    }
++
+     info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
+     if (!info->bm_o || !info->bm_o->buffer) {
+         info->bm_o = NULL;
+@@ -1546,16 +1823,11 @@ static inline size_t outline_size(const ASS_Outline* outline)
+     return sizeof(ASS_Vector) * outline->n_points + outline->n_segments;
+ }
+ 
+-size_t ass_bitmap_construct(void *key, void *value, void *priv)
++void ass_outline_apply_transform(ASS_Outline *outline, BitmapHashKey *k)
+ {
+-    RenderContext *state = priv;
+-    BitmapHashKey *k = key;
+-    Bitmap *bm = value;
+-
+     double m[3][3];
+     restore_transform(m, k);
+ 
+-    ASS_Outline outline[2];
+     if (k->matrix_z.x || k->matrix_z.y) {
+         ass_outline_transform_3d(&outline[0], &k->outline->outline[0], m);
+         ass_outline_transform_3d(&outline[1], &k->outline->outline[1], m);
+@@ -1563,8 +1835,18 @@ size_t ass_bitmap_construct(void *key, void *value, void *priv)
+         ass_outline_transform_2d(&outline[0], &k->outline->outline[0], m);
+         ass_outline_transform_2d(&outline[1], &k->outline->outline[1], m);
+     }
++}
+ 
+-    if (!ass_outline_to_bitmap(state, bm, &outline[0], &outline[1]))
++size_t ass_bitmap_construct(void *key, void *value, void *priv)
++{
++    RenderContext *state = priv;
++    BitmapHashKey *k = key;
++    Bitmap *bm = value;
++
++    ASS_Outline outline[2];
++    ass_outline_apply_transform(outline, k);
++
++    if (!ass_outline_to_bitmap(state, bm, &outline[0], &outline[1], &k->clip))
+         memset(bm, 0, sizeof(*bm));
+     ass_outline_free(&outline[0]);
+     ass_outline_free(&outline[1]);
+@@ -1660,6 +1942,9 @@ static void trim_whitespace(RenderContext *state)
+     GlyphInfo *cur;
+     TextInfo *ti = &state->text_info;
+ 
++    if (!ti->length)
++      return;
++
+     // Mark trailing spaces
+     i = ti->length - 1;
+     cur = ti->glyphs + i;
+@@ -1681,17 +1966,21 @@ static void trim_whitespace(RenderContext *state)
+         cur->starts_new_run = true;
+ 
+     // Mark all extraneous whitespace inbetween
++    // XXX: should this really start at 0 again?
+     for (i = 0; i < ti->length; ++i) {
+         cur = ti->glyphs + i;
+         if (cur->linebreak) {
+             // Mark whitespace before
+             j = i - 1;
+             cur = ti->glyphs + j;
+-            while (j && IS_WHITESPACE(cur)) {
++            // Use > instead of >= to avoid UB from moving the pointer outside valid range.
++            // White space at j == 0 was already trimmed in the "leading" loop before anyway.
++            while (j > 0 && IS_WHITESPACE(cur)) {
+                 cur->skip = true;
+                 cur->is_trimmed_whitespace = true;
+                 cur = ti->glyphs + --j;
+             }
++
+             // A break itself can contain a whitespace, too
+             cur = ti->glyphs + i;
+             if (cur->symbol == ' ' || cur->symbol == '\n') {
+@@ -1759,10 +2048,8 @@ wrap_lines_naive(RenderContext *state, double max_text_width, char *unibrks)
+             last_breakable = i;
+         }
+ 
+-        if (break_at != -1) {
++        if (break_at != -1 && break_at + 1 < text_info->length) {
+             // need to use one more line
+-            // marking break_at+1 as start of a new line
+-            int lead = break_at + 1;    // the first symbol of the new line
+             if (text_info->n_lines >= text_info->max_lines) {
+                 // Try to raise the maximum number of lines
+                 bool success = false;
+@@ -1777,12 +2064,13 @@ wrap_lines_naive(RenderContext *state, double max_text_width, char *unibrks)
+                     text_info->n_lines--;
+                 }
+             }
+-            if (lead < text_info->length) {
+-                text_info->glyphs[lead].linebreak = break_type;
+-                last_breakable = -1;
+-                s1 = text_info->glyphs + lead;
+-                text_info->n_lines++;
+-            }
++
++            // marking break_at+1 as start of a new line
++            int lead = break_at + 1; // the first symbol of the new line
++            text_info->glyphs[lead].linebreak = break_type;
++            last_breakable = -1;
++            s1 = text_info->glyphs + lead;
++            text_info->n_lines++;
+         }
+     }
+ }
+@@ -1791,6 +2079,7 @@ wrap_lines_naive(RenderContext *state, double max_text_width, char *unibrks)
+  * Rewind from a linestart position back to the first non-whitespace (0x20)
+  * character. Trailing ASCII whitespace gets trimmed in rendering.
+  * Assumes both arguments are part of the same array.
++ * start2 is never dereferenced.
+  */
+ static inline GlyphInfo *rewind_trailing_spaces(GlyphInfo *start1, GlyphInfo* start2)
+ {
+@@ -1823,6 +2112,8 @@ wrap_lines_rebalance(RenderContext *state, double max_text_width, char *unibrks)
+             if ((i == text_info->length) || cur->linebreak) {
+                 s1 = s2;
+                 s2 = s3;
++                // WARNING: this may point one past the end and thus
++                // must ONLY be used for pointer comparison; never dereferenced!
+                 s3 = cur;
+                 if (s1 && (s2->linebreak == 1)) {       // have at least 2 lines, and linebreak is 'soft'
+                     double l1, l2, l1_new, l2_new;
+@@ -1875,40 +2166,6 @@ wrap_lines_rebalance(RenderContext *state, double max_text_width, char *unibrks)
+ #undef DIFF
+ }
+ 
+-static void
+-wrap_lines_measure(RenderContext *state, char *unibrks)
+-{
+-    TextInfo *text_info = &state->text_info;
+-    int cur_line = 1;
+-    int i = 0;
+-
+-    while (i < text_info->length && text_info->glyphs[i].skip)
+-        ++i;
+-    double pen_shift_x = d6_to_double(-text_info->glyphs[i].pos.x);
+-    double pen_shift_y = 0.;
+-
+-    for (i = 0; i < text_info->length; ++i) {
+-        GlyphInfo *cur = text_info->glyphs + i;
+-        if (cur->linebreak) {
+-            while (i < text_info->length && cur->skip && !FORCEBREAK(cur->symbol, i))
+-                cur = text_info->glyphs + ++i;
+-            double height =
+-                text_info->lines[cur_line - 1].desc +
+-                text_info->lines[cur_line].asc;
+-            text_info->lines[cur_line - 1].len = i -
+-                text_info->lines[cur_line - 1].offset;
+-            text_info->lines[cur_line].offset = i;
+-            cur_line++;
+-            pen_shift_x = d6_to_double(-cur->pos.x);
+-            pen_shift_y += height + state->renderer->settings.line_spacing;
+-        }
+-        cur->pos.x += double_to_d6(pen_shift_x);
+-        cur->pos.y += double_to_d6(pen_shift_y);
+-    }
+-    text_info->lines[cur_line - 1].len =
+-        text_info->length - text_info->lines[cur_line - 1].offset;
+-}
+-
+ #undef ALLOWBREAK
+ #undef FORCEBREAK
+ 
+@@ -1955,7 +2212,6 @@ wrap_lines_smart(RenderContext *state, double max_text_width)
+ 
+     trim_whitespace(state);
+     measure_text(state);
+-    wrap_lines_measure(state, unibrks);
+ }
+ 
+ /**
+@@ -2097,8 +2353,7 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
+                 q = p;
+                 if (*p == '{')
+                     q++;
+-                while ((*q != '{') && (*q != 0))
+-                    q++;
++                q = ass_strchrnul(q, '{');
+                 drawing_text.str = p;
+                 drawing_text.len = q - p;
+                 code = 0xfffc; // object replacement character
+@@ -2145,12 +2400,8 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
+         // Fill glyph information
+         info->symbol = code;
+         info->font = state->font;
+-        for (int i = 0; i < 4; i++) {
+-            uint32_t clr = state->c[i];
+-            info->a_pre_fade[i] = _a(clr);
+-            ass_apply_fade(&clr, state->fade);
+-            info->c[i] = clr;
+-        }
++        for (int i = 0; i < 4; i++)
++            info->c[i] = state->c[i];
+ 
+         info->effect_type = state->effect_type;
+         info->effect_timing = state->effect_timing;
+@@ -2316,9 +2567,11 @@ static void apply_baseline_shear(RenderContext *state)
+             info->skip = true;
+         if (info->skip)
+             continue;
+-        for (GlyphInfo *cur = info; cur; cur = cur->next)
+-            cur->pos.y += shear;
+-        shear += (info->fay / info->scale_x * info->scale_y) * info->cluster_advance.x;
++        double fay = info->fay / info->scale_x * info->scale_y;
++        for (GlyphInfo *cur = info; cur; cur = cur->next) {
++            cur->pos.y += shear + fay * cur->offset.x;
++            shear += fay * cur->advance.x;
++        }
+     }
+ }
+ 
+@@ -2501,20 +2754,33 @@ static void render_and_combine_glyphs(RenderContext *state,
+             if (flags & FILTER_NONZERO_SHADOW &&
+                 (info->effect_type == EF_KARAOKE_KF ||
+                  info->effect_type == EF_KARAOKE_KO ||
+-                 (info->a_pre_fade[0]) != 0xFF ||
++                 _a(info->c[0]) != 0xFF ||
+                  info->border_style == 3))
+                 flags |= FILTER_FILL_IN_SHADOW;
+             if (!(flags & FILTER_NONZERO_BORDER) &&
+                 !(flags & FILTER_FILL_IN_SHADOW))
+                 flags &= ~FILTER_NONZERO_SHADOW;
+             if ((flags & FILTER_NONZERO_BORDER &&
+-                 info->a_pre_fade[0] == 0 &&
+-                 info->a_pre_fade[1] == 0 &&
++                 _a(info->c[0]) == 0 &&
++                 _a(info->c[1]) == 0 &&
+                  info->fade == 0) ||
+                 info->border_style == 3)
+                 flags |= FILTER_FILL_IN_BORDER;
+ 
+             if (new_run) {
++                if (state->collect_metrics) {
++                    ASS_RunMetrics *run_metrics = calloc(1, sizeof(ASS_RunMetrics));
++                    if (run_metrics) {
++                        if (!state->run_metrics)
++                            state->run_metrics = run_metrics;
++
++                        if (state->current_run_metrics)
++                            state->current_run_metrics->next = run_metrics;
++
++                        state->current_run_metrics = run_metrics;
++                    }
++                }
++
+                 if (nb_bitmaps >= text_info->max_bitmaps) {
+                     size_t new_size = 2 * text_info->max_bitmaps;
+                     if (!ASS_REALLOC_ARRAY(text_info->combined_bitmaps, new_size))
+@@ -2526,6 +2792,9 @@ static void render_and_combine_glyphs(RenderContext *state,
+                 current_info = &combined_info[nb_bitmaps];
+ 
+                 memcpy(&current_info->c, &info->c, sizeof(info->c));
++                for (int i = 0; i < 4; i++)
++                    ass_apply_fade(&current_info->c[i], info->fade);
++
+                 current_info->effect_type = info->effect_type;
+                 current_info->effect_timing = info->effect_timing;
+                 current_info->leftmost_x = OUTLINE_MAX;
+@@ -2560,13 +2829,27 @@ static void render_and_combine_glyphs(RenderContext *state,
+                 current_info->max_bitmap_count = MAX_SUB_BITMAPS_INITIAL;
+ 
+                 nb_bitmaps++;
+-                new_run = false;
+             }
+             assert(current_info);
+ 
+             ASS_Vector pos, pos_o;
+             info->pos.x = double_to_d6(device_x + d6_to_double(info->pos.x) * render_priv->par_scale_x);
+             info->pos.y = double_to_d6(device_y) + info->pos.y;
++
++            if (state->collect_metrics) {
++                assert(state->current_run_metrics);
++                if (new_run) {
++                    state->current_run_metrics->pos.x = d6_to_double(info->pos.x);
++                    state->current_run_metrics->pos.y = d6_to_double(info->pos.y);
++                }
++                state->current_run_metrics->advance.x += d6_to_double(info->cluster_advance.x);
++                state->current_run_metrics->advance.y += d6_to_double(info->cluster_advance.y);
++                state->current_run_metrics->asc = FFMAX(state->current_run_metrics->asc, d6_to_double(info->asc));
++                state->current_run_metrics->desc = FFMAX(state->current_run_metrics->desc, d6_to_double(info->desc));
++            }
++
++            new_run = false;
++
+             get_bitmap_glyph(state, info, &current_info->leftmost_x, &pos, &pos_o,
+                              &offset, !current_info->bitmap_count, flags);
+ 
+@@ -2765,12 +3048,7 @@ size_t ass_composite_construct(void *key, void *value, void *priv)
+         } else {
+             ass_copy_bitmap(&render_priv->engine, &v->bm_s, &v->bm);
+         }
+-
+-        // Works right even for negative offsets
+-        // '>>' rounds toward negative infinity, '&' returns correct remainder
+-        v->bm_s.left += k->filter.shadow.x >> 6;
+-        v->bm_s.top  += k->filter.shadow.y >> 6;
+-        ass_shift_bitmap(&v->bm_s, k->filter.shadow.x & SUBPIXEL_MASK, k->filter.shadow.y & SUBPIXEL_MASK);
++        ass_shift_bitmap(&render_priv->engine, &v->bm_s, k->filter.shadow.x, k->filter.shadow.y);
+     }
+ 
+     if ((flags & FILTER_FILL_IN_SHADOW) && !(flags & FILTER_FILL_IN_BORDER))
+@@ -2804,8 +3082,10 @@ static void add_background(RenderContext *state, EventImages *event_images)
+     if (!nbuffer)
+         return;
+     memset(nbuffer, 0xFF, w * h);
++    uint32_t clr = state->c[3];
++    ass_apply_fade(&clr, state->fade);
+     ASS_Image *img = my_draw_bitmap(nbuffer, w, h, w, left, top,
+-                                    state->c[3], NULL);
++                                    clr, NULL);
+     if (img) {
+         img->next = event_images->imgs;
+         event_images->imgs = img;
+@@ -2816,11 +3096,12 @@ static void add_background(RenderContext *state, EventImages *event_images)
+  * \brief Main ass rendering function, glues everything together
+  * \param event event to render
+  * \param event_images struct containing resulting images, will also be initialized
++ * \param whether to collect metrics
+  * Process event, appending resulting ASS_Image's to images_root.
+  */
+ static bool
+ ass_render_event(RenderContext *state, ASS_Event *event,
+-                 EventImages *event_images)
++                 EventImages *event_images, bool collect_metrics)
+ {
+     ASS_Renderer *render_priv = state->renderer;
+     if (event->Style >= render_priv->track->n_styles) {
+@@ -2834,6 +3115,7 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+ 
+     free_render_context(state);
+     init_render_context(state, event);
++    state->collect_metrics = collect_metrics;
+ 
+     if (!parse_events(state, event))
+         return false;
+@@ -2868,8 +3150,13 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+         (event->MarginL) ? event->MarginL : state->style->MarginL;
+     int MarginR =
+         (event->MarginR) ? event->MarginR : state->style->MarginR;
+-    int MarginV =
+-        (event->MarginV) ? event->MarginV : state->style->MarginV;
++    int MarginT =
++        (event->MarginT) ? event->MarginT : state->style->MarginT;
++    int MarginB =
++        (event->MarginB) ? event->MarginB : state->style->MarginB;
++
++    if (MarginB == INT_MIN)
++        MarginB = MarginT;
+ 
+     // calculate max length of a line
+     double max_text_width =
+@@ -2941,7 +3228,7 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+         if (valign == VALIGN_TOP) {     // toptitle
+             device_y =
+                 y2scr_top(state,
+-                          MarginV) + text_info->lines[0].asc;
++                          MarginT) + text_info->lines[0].asc;
+         } else if (valign == VALIGN_CENTER) {   // midtitle
+             double scr_y =
+                 y2scr(state, render_priv->track->PlayResY / 2.0);
+@@ -2955,7 +3242,7 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+                        "Invalid valign, assuming 0 (subtitle)");
+             scr_bottom =
+                 y2scr_sub(state,
+-                          render_priv->track->PlayResY - MarginV);
++                          render_priv->track->PlayResY - MarginB);
+             scr_top = y2scr_top(state, 0); //xxx not always 0?
+             device_y = scr_bottom + (scr_top - scr_bottom) * line_pos / 100.0;
+             device_y -= text_info->height;
+@@ -3029,6 +3316,11 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+     event_images->event = event;
+     event_images->imgs = render_text(state);
+ 
++    if (collect_metrics) {
++        event_images->metrics.event = event;
++        event_images->metrics.runs = state->run_metrics;
++    }
++
+     if (state->border_style == 4)
+         add_background(state, event_images);
+ 
+@@ -3068,7 +3360,7 @@ static void setup_shaper(ASS_Shaper *shaper, ASS_Renderer *render_priv)
+  */
+ static bool
+ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
+-                long long now)
++                long long now, bool collect_metrics)
+ {
+     if (!render_priv->settings.frame_width
+         && !render_priv->settings.frame_height)
+@@ -3112,7 +3404,11 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
+     }
+     render_priv->par_scale_x = par;
+ 
+-    render_priv->prev_images_root = render_priv->images_root;
++    if (collect_metrics) {
++        ass_frame_unref(render_priv->images_root);
++    } else {
++        render_priv->prev_images_root = render_priv->images_root;
++    }
+     render_priv->images_root = NULL;
+ 
+     check_cache_limits(render_priv, &render_priv->cache);
+@@ -3188,6 +3484,12 @@ shift_event(ASS_Renderer *render_priv, EventImages *ei, int shift)
+         cur = cur->next;
+     }
+     ei->top += shift;
++
++    ASS_RunMetrics *run = ei->metrics.runs;
++    while (run) {
++        run->pos.y += shift;
++        run = run->next;
++    }
+ }
+ 
+ // dir: 1 - move down
+@@ -3363,7 +3665,26 @@ static int ass_detect_change(ASS_Renderer *priv)
+ }
+ 
+ /**
+- * \brief render a frame
++ * \brief free a single image.
++ * \param img image as returned by ass_render_frame().
++ *        Only img will be freed, not img->next.
++ * \return img->next
++ * Should not be called outside of ass_frame_unref
++ * once the image list's refcounting is set up.
++ */
++static ASS_Image *ass_free_image(ASS_Image *img) {
++    ASS_Image *next = img->next;
++
++    ASS_ImagePriv *priv = (ASS_ImagePriv *) img;
++    ass_cache_dec_ref(priv->source);
++    ass_aligned_free(priv->buffer);
++    free(priv);
++
++    return next;
++}
++
++/**
++ * \brief render a frame or collect metrics
+  * \param priv library handle
+  * \param track track
+  * \param now current video timestamp (ms)
+@@ -3371,14 +3692,16 @@ static int ass_detect_change(ASS_Renderer *priv)
+  *        0 if identical, 1 if different positions, 2 if different content.
+  *        Can be NULL, in that case no detection is performed.
+  */
+-ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
+-                            long long now, int *detect_change)
++int ass_render_frame_internal(ASS_Renderer *priv, ASS_Track *track,
++                              long long now, int *detect_change, bool collect_metrics)
+ {
++    ass_free_metrics(priv);
++
+     // init frame
+-    if (!ass_start_frame(priv, track, now)) {
++    if (!ass_start_frame(priv, track, now, collect_metrics)) {
+         if (detect_change)
+             *detect_change = 2;
+-        return NULL;
++        return -1;
+     }
+ 
+     // render events separately
+@@ -3393,7 +3716,8 @@ ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
+                     realloc(priv->eimg,
+                             priv->eimg_size * sizeof(EventImages));
+             }
+-            if (ass_render_event(&priv->state, event, priv->eimg + cnt))
++            (priv->eimg + cnt)->metrics = (ASS_Metrics) { 0 };
++            if (ass_render_event(&priv->state, event, priv->eimg + cnt, collect_metrics))
+                 cnt++;
+         }
+     }
+@@ -3412,29 +3736,127 @@ ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
+     if (cnt > 0)
+         fix_collisions(priv, last, priv->eimg + cnt - last);
+ 
+-    // concat lists
++    // concat lists, removing fully transparent bitmaps
+     ASS_Image **tail = &priv->images_root;
+     for (int i = 0; i < cnt; i++) {
+         ASS_Image *cur = priv->eimg[i].imgs;
+         while (cur) {
++            if (_a(cur->color) == 0xFF) {
++                cur = ass_free_image(cur);
++                continue;
++            }
++
+             *tail = cur;
+             tail = &cur->next;
+             cur = cur->next;
+         }
+     }
++
++    // If the last image was skipped in the above loop, *tail may not be NULL and needs to be set to NULL.
++    *tail = NULL;
++
+     ass_frame_ref(priv->images_root);
++    if (collect_metrics) {
++        ass_frame_unref(priv->images_root);
++        priv->images_root = NULL;
++    }
+ 
+     if (detect_change)
+         *detect_change = ass_detect_change(priv);
+ 
+-    // free the previous image list
+-    ass_frame_unref(priv->prev_images_root);
+-    priv->prev_images_root = NULL;
++    if (!collect_metrics) {
++        // free the previous image list
++        ass_frame_unref(priv->prev_images_root);
++        priv->prev_images_root = NULL;
++    }
+ 
+     if (track->parser_priv->prune_delay >= 0)
+         ass_prune_events(track, now - track->parser_priv->prune_delay);
+ 
+-    return priv->images_root;
++    return cnt;
++}
++
++/**
++ * \brief render a frame
++ * \param priv library handle
++ * \param track track
++ * \param now current video timestamp (ms)
++ * \param detect_change a value describing how the new images differ from the previous ones will be written here:
++ *        0 if identical, 1 if different positions, 2 if different content.
++ *        Can be NULL, in that case no detection is performed.
++ */
++ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
++                            long long now, int *detect_change)
++{
++    int cnt = ass_render_frame_internal(priv, track, now, detect_change, false);
++    return cnt >= 0 ? priv->images_root : NULL;
++}
++
++/**
++ * \brief Get metrics for a frame, producing a list of ASS_Metrics.
++ * \param priv renderer handle
++ * \param track subtitle track
++ * \param now video timestamp in milliseconds
++ */
++ASS_Metrics *ass_get_metrics(ASS_Renderer *priv, ASS_Track *track, long long now)
++{
++    int cnt = ass_render_frame_internal(priv, track, now, NULL, true);
++    if (cnt <= 0)
++        return NULL;
++
++    ASS_Metrics *root = &priv->eimg[0].metrics;
++    ASS_Metrics *cur = root;
++    for (int i = 1; i < cnt; i++) {
++        cur->next = &priv->eimg[i].metrics;
++        cur = cur->next;
++    }
++    cur->next = NULL;
++
++    return root;
++}
++
++
++/**
++ * \brief Free an ASS_Metrics_Outline's memory as well as all the
++ * memory of all ASS_Metrics_Outlines following it.
++ */
++void ass_free_metrics_outlines(ASS_Metrics_Outline *outline)
++{
++    while (outline) {
++        ASS_Metrics_Outline *next = outline->next;
++        ass_metric_outline_free(outline);
++        free(outline);
++        outline = next;
++    }
++}
++
++/**
++ * \brief Free all memory that was allocated for metrics.
++ */
++void ass_free_metrics(ASS_Renderer *priv)
++{
++    if (!priv->eimg_size || !priv->eimg)
++        return;
++
++    // The ASS_Metrics structs themselves are part of EventImages and
++    // are hence allocated and freed by ass_render_frame_internal.
++    // All contained pointers are owned by the ASS_Metrics struct
++    // and need to be freed here.
++    for (ASS_Metrics *metrics = &priv->eimg[0].metrics; metrics;) {
++        ASS_Metrics *next_metrics = metrics->next;
++        ASS_RunMetrics *run = metrics->runs;
++        while (run) {
++            ass_free_metrics_outlines(run->fill);
++            ass_free_metrics_outlines(run->border);
++            ASS_RunMetrics *next = run->next;
++            free(run);
++            run = next;
++        }
++        metrics->event = NULL;
++        metrics->runs = NULL;
++        metrics->next = NULL;
++        metrics = next_metrics;
++    }
+ }
+ 
+ /**
+@@ -3457,10 +3879,6 @@ void ass_frame_unref(ASS_Image *img)
+     if (!img || --((ASS_ImagePriv *) img)->ref_count)
+         return;
+     do {
+-        ASS_ImagePriv *priv = (ASS_ImagePriv *) img;
+-        img = img->next;
+-        ass_cache_dec_ref(priv->source);
+-        ass_aligned_free(priv->buffer);
+-        free(priv);
++        img = ass_free_image(img);
+     } while (img);
+ }
+diff --git a/libass/ass_render.h b/libass/ass_render.h
+index 7a157ab..dae9494 100644
+--- a/libass/ass_render.h
++++ b/libass/ass_render.h
+@@ -30,6 +30,7 @@
+ #include <hb.h>
+ 
+ #include "ass.h"
++#include "ass_metrics.h"
+ #include "ass_font.h"
+ #include "ass_bitmap.h"
+ #include "ass_cache.h"
+@@ -86,6 +87,7 @@ typedef struct {
+     int detect_collisions;
+     int shift_direction;
+     ASS_Event *event;
++    ASS_Metrics metrics;
+ } EventImages;
+ 
+ typedef enum {
+@@ -98,7 +100,7 @@ typedef enum {
+ // describes a combined bitmap
+ typedef struct {
+     FilterDesc filter;
+-    uint32_t c[4];              // colors
++    uint32_t c[4];              // colors (with fade applied)
+     Effect effect_type;
+ 
+     // during render_and_combine_glyphs: distance in subpixels from the karaoke origin.
+@@ -143,7 +145,6 @@ typedef struct glyph_info {
+     char linebreak;             // the first (leading) glyph of some line ?
+     bool starts_new_run;
+     uint32_t c[4];              // colors
+-    uint8_t a_pre_fade[4];      // alpha values before applying fades
+     ASS_Vector advance;         // 26.6
+     ASS_Vector cluster_advance;
+     Effect effect_type;
+@@ -183,7 +184,6 @@ typedef struct glyph_info {
+ 
+ typedef struct {
+     double asc, desc;
+-    int offset, len;
+ } LineInfo;
+ 
+ typedef struct {
+@@ -217,6 +217,10 @@ struct render_context {
+     ASS_Event *event;
+     ASS_Style *style;
+ 
++    bool collect_metrics;
++    ASS_RunMetrics *run_metrics;
++    ASS_RunMetrics *current_run_metrics;
++
+     ASS_Font *font;
+     double font_size;
+     int parsed_tags;
+@@ -272,12 +276,12 @@ struct render_context {
+     } scroll_direction;         // for EVENT_HSCROLL, EVENT_VSCROLL
+     double scroll_shift;
+     int scroll_y0, scroll_y1;
++    double scroll_fade_width;
+ 
+     // face properties
+     ASS_StringView family;
+     unsigned bold;
+     unsigned italic;
+-    int treat_family_as_pattern;
+     int wrap_style;
+     int font_encoding;
+ 
+@@ -355,6 +359,9 @@ typedef struct {
+ } Rect;
+ 
+ void ass_reset_render_context(RenderContext *state, ASS_Style *style);
++int ass_render_frame_internal(ASS_Renderer *priv, ASS_Track *track, long long now, int *detect_change, bool collect_metrics);
++void ass_outline_apply_transform(ASS_Outline *outline, BitmapHashKey *k);
++void ass_free_metrics(ASS_Renderer *priv);
+ void ass_frame_ref(ASS_Image *img);
+ void ass_frame_unref(ASS_Image *img);
+ ASS_Vector ass_layout_res(ASS_Renderer *render_priv);
+diff --git a/libass/ass_types.h b/libass/ass_types.h
+index 4d9e0ec..c59ce15 100644
+--- a/libass/ass_types.h
++++ b/libass/ass_types.h
+@@ -125,11 +125,15 @@ typedef struct ass_style {
+     int Alignment; // use `VALIGN_* | HALIGN_*` as value
+     int MarginL;
+     int MarginR;
+-    int MarginV;
++    union {
++        int MarginV;
++        int MarginT;
++    };
++    int MarginB; // Applies only if set to a non-INT_MIN value
+     int Encoding;
+-    int treat_fontname_as_pattern; // does nothing (left in place for ABI-compatibility)
+     double Blur; // sets a default \blur for the event; same values as \blur
+     int Justify; // sets text justification independent of event alignment; use ASS_JUSTIFY_*
++    int RelativeTo; // 0 for dialogue, 1 for typesetting, 2 for auto
+ } ASS_Style;
+ 
+ 
+@@ -147,7 +151,11 @@ typedef struct ass_event {
+     char *Name;
+     int MarginL;
+     int MarginR;
+-    int MarginV;
++    union {
++        int MarginV;
++        int MarginT;
++    };
++    int MarginB;
+     char *Effect;
+     char *Text;
+ 
+@@ -280,7 +288,8 @@ typedef struct ass_track {
+     enum {
+         TRACK_TYPE_UNKNOWN = 0,
+         TRACK_TYPE_ASS,
+-        TRACK_TYPE_SSA
++        TRACK_TYPE_SSA,
++        TRACK_TYPE_ASS2,
+     } track_type;
+ 
+     // Script header fields
+@@ -305,4 +314,8 @@ typedef struct ass_track {
+     // New fields can be added here in new ABI-compatible library releases.
+ } ASS_Track;
+ 
++typedef struct {
++    double x, y;
++} ASS_DVector;
++
+ #endif /* LIBASS_TYPES_H */
+diff --git a/libass/ass_utils.c b/libass/ass_utils.c
+index 01bb8a8..fbaca7a 100644
+--- a/libass/ass_utils.c
++++ b/libass/ass_utils.c
+@@ -56,6 +56,75 @@ char *ass_strndup_fallback(const char *s, size_t n)
+ }
+ #endif
+ 
++#if (defined(_WIN32) || defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)) && \
++    (defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)) && \
++    (defined(__GNUC__))
++#define ALIGNED_OVERREADS_SAFE 1
++#endif
++
++#if __has_attribute(vector_size) && defined(ALIGNED_OVERREADS_SAFE)
++
++#if __has_builtin(__builtin_ia32_pmovmskb128) && defined(__SSE2__)
++#define VEC_ANY_ZERO(x) (__builtin_ia32_pmovmskb128((x) == 0) != 0)
++#define VECTOR_SIZE 16
++#elif __has_builtin(__builtin_neon_vminvq_u8) && defined(__ARM_NEON__)
++#define VEC_ANY_ZERO(x) (__builtin_neon_vminvq_u8(x) == 0)
++#define VECTOR_SIZE 16
++#elif __has_builtin(__builtin_aarch64_reduc_umin_scal_v16qi_uu) && defined(__ARM_NEON__)
++#define VEC_ANY_ZERO(x) (__builtin_aarch64_reduc_umin_scal_v16qi_uu(x) == 0)
++#define VECTOR_SIZE 16
++#endif
++
++#ifdef VEC_ANY_ZERO
++typedef unsigned char CheckVector __attribute__ ((vector_size(VECTOR_SIZE)));
++#endif
++
++#endif // __has_attribute(vector_size)
++
++#if ALIGNED_OVERREADS_SAFE && !defined(VEC_ANY_ZERO)
++
++typedef size_t CheckVector;
++#define USE_SCALAR_TYPE 1
++#define LOWS ((size_t)-1 / 0xFF)
++#define HIGHS (LOWS * 0x80)
++#define VEC_ANY_ZERO(vec) (((vec) - LOWS) & ~(vec) & HIGHS)
++#define BROADCAST(c) ((c) * LOWS)
++
++#endif // defined(ALIGNED_OVERREADS_SAFE) && !defined(VEC_ANY_ZERO)
++
++#if ALIGNED_OVERREADS_SAFE && __has_attribute(no_sanitize)
++__attribute__((no_sanitize("address")))
++#endif
++char *ass_strchrnul(const char *s, int c)
++{
++#if ALIGNED_OVERREADS_SAFE && !defined(__GLIBC__)
++    for (; (uintptr_t)s % sizeof(CheckVector); s++) {
++        if (!*s || *s == c)
++            return (char*)s;
++    }
++
++    for (;; s += sizeof(CheckVector)) {
++        CheckVector vec;
++        memcpy(&vec, s, sizeof(vec));
++#ifdef USE_SCALAR_TYPE
++        if (VEC_ANY_ZERO(vec) || VEC_ANY_ZERO(vec ^ BROADCAST(c)))
++            break;
++#else
++        if (VEC_ANY_ZERO(vec & (vec != (unsigned char)c)))
++            break;
++#endif
++    }
++#endif
++#ifdef HAVE_STRCHRNUL
++    return strchrnul(s, c);
++#else // HAVE_STRCHRNUL
++    while (*s && *s != c)
++        s++;
++
++    return (char*)s;
++#endif // HAVE_STRCHRNUL
++}
++
+ void *ass_aligned_alloc(size_t alignment, size_t size, bool zero)
+ {
+     assert(!(alignment & (alignment - 1))); // alignment must be power of 2
+diff --git a/libass/ass_utils.h b/libass/ass_utils.h
+index a5d4e5d..f6d60d3 100644
+--- a/libass/ass_utils.h
++++ b/libass/ass_utils.h
+@@ -93,6 +93,8 @@ void ass_aligned_free(void *ptr);
+ void *ass_realloc_array(void *ptr, size_t nmemb, size_t size);
+ void *ass_try_realloc_array(void *ptr, size_t nmemb, size_t size);
+ 
++char *ass_strchrnul(const char *s, int c);
++
+ /**
+  * Reallocate the array in ptr to at least count elements. For example, if
+  * you do "int *ptr = NULL; ASS_REALLOC_ARRAY(ptr, 5)", you can access ptr[0]
+@@ -186,6 +188,12 @@ static inline long ass_lrint(double x)
+ #endif
+ }
+ 
++#if __has_builtin(__builtin_isnan)
++    #define ass_isnan __builtin_isnan
++#else
++    #define ass_isnan isnan
++#endif
++
+ static inline int d6_to_int(int x)
+ {
+     return (x + 32) >> 6;
+diff --git a/libass/c/c_shift.c b/libass/c/c_shift.c
+new file mode 100644
+index 0000000..65d5fb1
+--- /dev/null
++++ b/libass/c/c_shift.c
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (C) 2024-2026 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "config.h"
++#include "ass_compat.h"
++#include "ass_utils.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++
++#define ALIGNMENT  16
++
++/**
++ * \brief Shift a bitmap by the fraction of a pixel in negative x and y direction
++ * expressed in 26.6 fixed point
++ */
++void ass_shift_c(uint8_t *restrict buf, ptrdiff_t stride,
++                 size_t width, size_t height, int shift_x, int shift_y)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++    ASSUME(!(shift_x & ~63) && !(shift_y & ~63));
++    ASSUME(width > 1 && height > 1);
++
++    int16_t sy = shift_y << 9;
++    for (int32_t y = 1; y < height; y++) {
++        for (int32_t x = 1; x < width; x++) {
++            int16_t tmp1 = 64 * buf[x - 1] - (buf[x - 1] - buf[x]) * (int16_t) shift_x;
++            int16_t tmp2 = 64 * buf[x + stride - 1] - (buf[x + stride - 1] - buf[x + stride]) * (int16_t) shift_x;
++            buf[x - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * (tmp1 - tmp2)) * (int32_t) sy >> 16) + 32) >> 6;
++        }
++        int16_t tmp1 = 64 * buf[width - 1] - buf[width - 1] * (int16_t) shift_x;
++        int16_t tmp2 = 64 * buf[width + stride - 1] - buf[width + stride - 1] * (int16_t) shift_x;
++        buf[width - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * (tmp1 - tmp2)) * (int32_t) sy >> 16) + 32) >> 6;
++        buf += stride;
++    }
++    for (int32_t x = 1; x < width; x++) {
++        int16_t tmp1 = 64 * buf[x - 1] - (buf[x - 1] - buf[x]) * (int16_t) shift_x;
++        buf[x - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * tmp1) * (int32_t) sy >> 16) + 32) >> 6;
++    }
++    int16_t tmp1 = 64 * buf[width - 1] - buf[width - 1] * (int16_t) shift_x;
++    buf[width - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * tmp1) * (int32_t) sy >> 16) + 32) >> 6;
++}
+diff --git a/libass/libass.sym b/libass/libass.sym
+index 4cc6215..f8442bf 100644
+--- a/libass/libass.sym
++++ b/libass/libass.sym
+@@ -48,3 +48,4 @@ ass_malloc
+ ass_free
+ ass_prune_events
+ ass_configure_prune
++ass_get_metrics
+diff --git a/libass/meson.build b/libass/meson.build
+index 5251c2f..46a7201 100644
+--- a/libass/meson.build
++++ b/libass/meson.build
+@@ -29,6 +29,7 @@ src_x86 = files(
+     'x86/blur.asm',
+     'x86/cpuid.asm',
+     'x86/rasterizer.asm',
++    'x86/shift.asm',
+ )
+ src_aarch64 = files(
+     'aarch64/asm.S',
+@@ -36,6 +37,7 @@ src_aarch64 = files(
+     'aarch64/blend_bitmaps.S',
+     'aarch64/blur.S',
+     'aarch64/rasterizer.S',
++    'aarch64/shift.S',
+ )
+ src_fontconfig = files('ass_fontconfig.c')
+ src_directwrite = files('ass_directwrite.c')
+@@ -46,7 +48,9 @@ libass_src = files(
+     'c/c_blend_bitmaps.c',
+     'c/c_blur.c',
+     'c/c_rasterizer.c',
++    'c/c_shift.c',
+     'ass.c',
++    'ass_arabic_charmap.c',
+     'ass_bitmap.c',
+     'ass_bitmap_engine.c',
+     'ass_blur.c',
+@@ -69,7 +73,7 @@ libass_src = files(
+ 
+ libass_link_with = []
+ 
+-libass_headers = files('ass.h', 'ass_types.h')
++libass_headers = files('ass.h', 'ass_types.h', 'ass_metrics.h')
+ 
+ if fontconfig
+     libass_src += src_fontconfig
+@@ -93,7 +97,7 @@ if enable_asm
+         libass_src += asm_sources
+     else
+         asm_lib = static_library(
+-            'libass_asm',
++            'ass_asm',
+             config_h,
+             sources: asm_sources,
+             c_args: asm_args,
+diff --git a/libass/x86/shift.asm b/libass/x86/shift.asm
+new file mode 100644
+index 0000000..584be0d
+--- /dev/null
++++ b/libass/x86/shift.asm
+@@ -0,0 +1,280 @@
++;******************************************************************************
++;* shift.asm: SSE2/AVX2 subpixel bitmap shift
++;******************************************************************************
++;* Copyright (C) 2026 libass contributors
++;*
++;* This file is part of libass.
++;*
++;* Permission to use, copy, modify, and distribute this software for any
++;* purpose with or without fee is hereby granted, provided that the above
++;* copyright notice and this permission notice appear in all copies.
++;*
++;* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++;* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++;* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++;* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++;* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++;* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++;******************************************************************************
++
++%include "x86/utils.asm"
++
++SECTION .text
++
++;------------------------------------------------------------------------------
++; SHIFT_X 1:m_dst, 2:m_src1, 3:m_src2,
++;         4:m_tmp, 5:m_mul(64), 6:r_mul(32), 6:mode
++; Perform subpixel shift along X axis
++;------------------------------------------------------------------------------
++
++%macro SHIFT_X 7
++%ifidn %7, even
++    %assign %%mode 0
++%elifidn %7, odd
++    %assign %%mode 1
++%elifidn %7, last
++    %assign %%mode 2
++%else
++    %error "even/odd/last expected"
++%endif
++
++%if %%mode == 2 && mmsize != 32
++    psrldq m%1, m%2, 2
++%else
++    PALIGNR m%1,m%3,m%2, m%4, 2
++%endif
++%if %%mode == 1 && mmsize == 32
++    mova m%3, m%4
++%endif
++    psubw m%1, m%2
++%if ARCH_X86_64
++    pmullw m%1, m%5
++%else
++    BCASTD %4, %6d
++    pmullw m%1, m%4
++%endif
++%if %%mode == 0 && mmsize == 32
++    psllw m%4, m%2, 6
++    paddw m%1, m%4
++%else
++    psllw m%2, 6
++    paddw m%1, m%2
++%endif
++%endmacro
++
++;------------------------------------------------------------------------------
++; SHIFT_Y 1:m_dst/m_src1, 2:m_src2,
++;         3:m_tmp, 4:m_mul(64), 5:r_mul(32), 6:m_w32(64), 7:mode
++; Perform subpixel shift along Y axis
++;------------------------------------------------------------------------------
++
++%macro SHIFT_Y 6-7
++%ifidn %7, last
++    paddw m%3, m%1, m%1
++%else
++    psubw m%3, m%1, m%2
++    paddw m%3, m%3
++%endif
++%if ARCH_X86_64
++    pmulhw m%3, m%4
++    psubw m%1, m%3
++    paddw m%1, m%6
++%else
++    BCASTD %2, %5d
++    pmulhw m%3, m%2
++    psubw m%1, m%3
++    pcmpeqw m%2, m%2
++    psllw m%2, 5
++    psubw m%1, m%2
++%endif
++    psrlw m%1, 6
++%endmacro
++
++;------------------------------------------------------------------------------
++; SHIFT
++; void ass_shift_c(uint8_t *buf, ptrdiff_t stride,
++;                  size_t width, size_t height, int shift_x, int shift_y);
++;------------------------------------------------------------------------------
++
++%macro SHIFT 0
++%if ARCH_X86_64
++cglobal shift, 6,6,13
++    DECLARE_REG_TMP 5
++%else
++cglobal shift, 6,7,8
++    DECLARE_REG_TMP 6
++    sub r3, 1
++%endif
++
++    lea r0, [r0 + r2]
++    neg r2
++    imul r3, r1
++    add r3, r0
++
++%if ARCH_X86_64
++    pxor m9, m9
++    BCASTW 10, r4d
++    shl r5d, 9
++    BCASTW 11, r5d
++    mov r4d, 32
++    BCASTW 12, r4d
++    lea r4, [r0 + r1]
++%else
++    imul r4d, 0x10001
++    imul r5d, 0x10001 << 9
++%endif
++
++.height_loop:
++    mov t0, r2
++    mova m0, [r0 + t0]
++%if ARCH_X86_64
++    punpcklbw m2, m0, m9
++    punpckhbw m4, m0, m9
++    mova m0, [r4 + t0]
++    punpcklbw m3, m0, m9
++    punpckhbw m5, m0, m9
++%else
++    pxor m7, m7
++    add r0, r1
++    punpcklbw m2, m0, m7
++    punpckhbw m4, m0, m7
++    mova m0, [r0 + t0]
++    sub r0, r1
++    punpcklbw m3, m0, m7
++    punpckhbw m5, m0, m7
++%endif
++    jmp .loop_entry
++
++.width_loop:
++    mova m0, [r0 + t0]
++%if ARCH_X86_64
++
++%if mmsize == 32
++    punpcklbw m7, m0, m9
++    vperm2i128 m2, m2, m7, 0x21
++%else
++    punpcklbw m2, m0, m9
++%endif
++    SHIFT_X 6,4,2, 7,10,r4, odd
++    punpckhbw m4, m0, m9
++
++    mova m0, [r4 + t0]
++%if mmsize == 32
++    punpcklbw m8, m0, m9
++    vperm2i128 m3, m3, m8, 0x21
++%else
++    punpcklbw m3, m0, m9
++%endif
++    SHIFT_X 7,5,3, 8,10,r4, odd
++    punpckhbw m5, m0, m9
++
++%else
++
++    add r0, r1
++    pxor m6, m6
++%if mmsize == 32
++    punpcklbw m7, m0, m6
++    vperm2i128 m2, m2, m7, 0x21
++%else
++    punpcklbw m2, m0, m6
++%endif
++    SHIFT_X 6,4,2, 7,10,r4, odd
++
++    mova m7, [r0 + t0]
++    sub r0, r1
++    punpckhqdq m4, m0, m7
++    pxor m0, m0
++%if mmsize == 32
++    punpcklbw m0, m7, m0
++    vperm2i128 m3, m3, m0, 0x21
++%else
++    punpcklbw m3, m7, m0
++%endif
++    SHIFT_X 7,5,3, 0,10,r4, odd
++    pxor m0, m0
++    punpckhbw m5, m4, m0
++    punpcklbw m4, m4, m0
++
++%endif
++
++    SHIFT_Y 6,7, 0,11,r5,12
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++
++.loop_entry:
++    SHIFT_X 1,2,4, 0,10,r4, even
++    SHIFT_X 7,3,5, 0,10,r4, even
++    SHIFT_Y 1,7, 0,11,r5,12
++
++    add t0, mmsize
++    jnc .width_loop
++
++%if mmsize == 32
++    vperm2i128 m2, m2, m2, 0x81
++    vperm2i128 m3, m3, m2, 0x81
++%endif
++    SHIFT_X 6,4,2, 0,10,r4, last
++    SHIFT_X 7,5,3, 0,10,r4, last
++    SHIFT_Y 6,7, 0,11,r5,12
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++
++%if ARCH_X86_64
++    mov r0, r4
++    add r4, r1
++    cmp r4, r3
++%else
++    add r0, r1
++    cmp r0, r3
++%endif
++    jl .height_loop
++
++    mov t0, r2
++    mova m0, [r0 + t0]
++%if !ARCH_X86_64
++    pxor m3, m3
++    %define m9 m3
++%endif
++    punpcklbw m2, m0, m9
++    punpckhbw m4, m0, m9
++    jmp .last_loop_entry
++
++.last_width_loop:
++    mova m0, [r0 + t0]
++%if mmsize == 32
++    punpcklbw m7, m0, m9
++    vperm2i128 m2, m2, m7, 0x21
++%else
++    punpcklbw m2, m0, m9
++%endif
++    SHIFT_X 6,4,2, 7,10,r4, odd
++    punpckhbw m4, m0, m9
++
++    SHIFT_Y 6,7, 0,11,r5,12, last
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++
++.last_loop_entry:
++    SHIFT_X 1,2,4, 0,10,r4, even
++    SHIFT_Y 1,7, 0,11,r5,12, last
++
++    add t0, mmsize
++    jnc .last_width_loop
++
++%if mmsize == 32
++    vperm2i128 m2, m2, m2, 0x81
++%endif
++    SHIFT_X 6,4,2, 0,10,r4, last
++    SHIFT_Y 6,7, 0,11,r5,12, last
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++    RET
++%endmacro
++
++INIT_XMM sse2
++SHIFT
++INIT_XMM ssse3
++SHIFT
++INIT_YMM avx2
++SHIFT
+diff --git a/meson.build b/meson.build
+index 4b1c24e..56e9a59 100644
+--- a/meson.build
++++ b/meson.build
+@@ -60,7 +60,7 @@ add_project_arguments(
+ 
+ # Configuration
+ 
+-str_check_functions = ['strdup', 'strndup']
++str_check_functions = ['strdup', 'strndup', 'strchrnul']
+ 
+ foreach name : str_check_functions
+     if (
+@@ -310,6 +310,11 @@ if not asm_option.disabled()
+                 )
+             endif
+ 
++            # Convert SSE asm into (128-bit) AVX when compiler flags are set to use AVX instructions
++            if cc.get_define('__AVX__').strip() != ''
++                nasm_args += '-DFORCE_VEX_ENCODING=1'
++            endif
++
+             add_project_arguments(nasm_args, language: 'nasm')
+         endif
+     elif generic_cpu_family == 'aarch64'
