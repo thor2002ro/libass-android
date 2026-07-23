@@ -1,0 +1,152 @@
+diff --git a/configure.ac b/configure.ac
+index 27676b3..50085c4 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -16,7 +16,7 @@ AM_PROG_AS
+ AC_CHECK_HEADERS_ONCE([iconv.h])
+ 
+ # Checks for library functions.
+-AC_CHECK_FUNCS([strdup strndup])
++AC_CHECK_FUNCS([strdup strndup strchrnul])
+ 
+ # Query configuration parameters and set their description
+ AC_ARG_ENABLE([test], AS_HELP_STRING([--enable-test],
+diff --git a/libass/ass_compat.h b/libass/ass_compat.h
+index cdb58ce..8a44ff2 100644
+--- a/libass/ass_compat.h
++++ b/libass/ass_compat.h
+@@ -30,6 +30,14 @@
+ #define inline __inline
+ #endif
+ 
++#ifndef __has_builtin
++#define __has_builtin(...) 0
++#endif
++
++#ifndef __has_attribute
++#define __has_attribute(...) 0
++#endif
++
+ // Work around build failures on Windows with static FriBidi.
+ // Possible because we only use FriBidi functions, not objects.
+ #if defined(_WIN32) && !defined(FRIBIDI_LIB_STATIC)
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index 8de5027..0a5652d 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -2117,8 +2117,7 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
+                 q = p;
+                 if (*p == '{')
+                     q++;
+-                while ((*q != '{') && (*q != 0))
+-                    q++;
++                q = ass_strchrnul(q, '{');
+                 drawing_text.str = p;
+                 drawing_text.len = q - p;
+                 code = 0xfffc; // object replacement character
+diff --git a/libass/ass_utils.c b/libass/ass_utils.c
+index 01bb8a8..fbaca7a 100644
+--- a/libass/ass_utils.c
++++ b/libass/ass_utils.c
+@@ -56,6 +56,75 @@ char *ass_strndup_fallback(const char *s, size_t n)
+ }
+ #endif
+ 
++#if (defined(_WIN32) || defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)) && \
++    (defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)) && \
++    (defined(__GNUC__))
++#define ALIGNED_OVERREADS_SAFE 1
++#endif
++
++#if __has_attribute(vector_size) && defined(ALIGNED_OVERREADS_SAFE)
++
++#if __has_builtin(__builtin_ia32_pmovmskb128) && defined(__SSE2__)
++#define VEC_ANY_ZERO(x) (__builtin_ia32_pmovmskb128((x) == 0) != 0)
++#define VECTOR_SIZE 16
++#elif __has_builtin(__builtin_neon_vminvq_u8) && defined(__ARM_NEON__)
++#define VEC_ANY_ZERO(x) (__builtin_neon_vminvq_u8(x) == 0)
++#define VECTOR_SIZE 16
++#elif __has_builtin(__builtin_aarch64_reduc_umin_scal_v16qi_uu) && defined(__ARM_NEON__)
++#define VEC_ANY_ZERO(x) (__builtin_aarch64_reduc_umin_scal_v16qi_uu(x) == 0)
++#define VECTOR_SIZE 16
++#endif
++
++#ifdef VEC_ANY_ZERO
++typedef unsigned char CheckVector __attribute__ ((vector_size(VECTOR_SIZE)));
++#endif
++
++#endif // __has_attribute(vector_size)
++
++#if ALIGNED_OVERREADS_SAFE && !defined(VEC_ANY_ZERO)
++
++typedef size_t CheckVector;
++#define USE_SCALAR_TYPE 1
++#define LOWS ((size_t)-1 / 0xFF)
++#define HIGHS (LOWS * 0x80)
++#define VEC_ANY_ZERO(vec) (((vec) - LOWS) & ~(vec) & HIGHS)
++#define BROADCAST(c) ((c) * LOWS)
++
++#endif // defined(ALIGNED_OVERREADS_SAFE) && !defined(VEC_ANY_ZERO)
++
++#if ALIGNED_OVERREADS_SAFE && __has_attribute(no_sanitize)
++__attribute__((no_sanitize("address")))
++#endif
++char *ass_strchrnul(const char *s, int c)
++{
++#if ALIGNED_OVERREADS_SAFE && !defined(__GLIBC__)
++    for (; (uintptr_t)s % sizeof(CheckVector); s++) {
++        if (!*s || *s == c)
++            return (char*)s;
++    }
++
++    for (;; s += sizeof(CheckVector)) {
++        CheckVector vec;
++        memcpy(&vec, s, sizeof(vec));
++#ifdef USE_SCALAR_TYPE
++        if (VEC_ANY_ZERO(vec) || VEC_ANY_ZERO(vec ^ BROADCAST(c)))
++            break;
++#else
++        if (VEC_ANY_ZERO(vec & (vec != (unsigned char)c)))
++            break;
++#endif
++    }
++#endif
++#ifdef HAVE_STRCHRNUL
++    return strchrnul(s, c);
++#else // HAVE_STRCHRNUL
++    while (*s && *s != c)
++        s++;
++
++    return (char*)s;
++#endif // HAVE_STRCHRNUL
++}
++
+ void *ass_aligned_alloc(size_t alignment, size_t size, bool zero)
+ {
+     assert(!(alignment & (alignment - 1))); // alignment must be power of 2
+diff --git a/libass/ass_utils.h b/libass/ass_utils.h
+index 5b7cc7a..f6d60d3 100644
+--- a/libass/ass_utils.h
++++ b/libass/ass_utils.h
+@@ -93,6 +93,8 @@ void ass_aligned_free(void *ptr);
+ void *ass_realloc_array(void *ptr, size_t nmemb, size_t size);
+ void *ass_try_realloc_array(void *ptr, size_t nmemb, size_t size);
+ 
++char *ass_strchrnul(const char *s, int c);
++
+ /**
+  * Reallocate the array in ptr to at least count elements. For example, if
+  * you do "int *ptr = NULL; ASS_REALLOC_ARRAY(ptr, 5)", you can access ptr[0]
+diff --git a/meson.build b/meson.build
+index 91a0435..56e9a59 100644
+--- a/meson.build
++++ b/meson.build
+@@ -60,7 +60,7 @@ add_project_arguments(
+ 
+ # Configuration
+ 
+-str_check_functions = ['strdup', 'strndup']
++str_check_functions = ['strdup', 'strndup', 'strchrnul']
+ 
+ foreach name : str_check_functions
+     if (

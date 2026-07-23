@@ -1,0 +1,26 @@
+diff --git a/Changelog b/Changelog
+index 79bec30..2b77a40 100644
+--- a/Changelog
++++ b/Changelog
+@@ -1,6 +1,6 @@
+ libass (0.17.5)
+- * Fix limited OOB read and write in wrap_lines_measure (GHSA-pjjp-65r7-ppgm; CVE pending)
+- * Fix OOB bit clears for negative Matroska ReadOrder fields (GHSA-5gf7-wjfm-vmvm; CVE pending)
++ * Fix limited OOB read and write in wrap_lines_measure (GHSA-pjjp-65r7-ppgm; CVE-2026-61627)
++ * Fix OOB bit clears for negative Matroska ReadOrder fields (GHSA-5gf7-wjfm-vmvm; CVE-2026-61626)
+  * Fix \fay with glyph clusters
+  * Fix small alpha changes not always splitting runs when combined with fade
+  * Fix compilation with MSVC-mode clang
+diff --git a/libass/ass_parse.c b/libass/ass_parse.c
+index 28d49e7..e85fc5e 100644
+--- a/libass/ass_parse.c
++++ b/libass/ass_parse.c
+@@ -219,7 +219,7 @@ static bool parse_vector_clip(RenderContext *state,
+ 
+     int scale = 1;
+     if (nargs == 2)
+-        scale = argtoi32(args[0]);
++        scale = FFMAX(argtoi32(args[0]), 1);
+ 
+     struct arg text = args[nargs - 1];
+     state->clip_drawing_text.str = text.start;

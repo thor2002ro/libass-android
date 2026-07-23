@@ -1,0 +1,814 @@
+diff --git a/Makefile_util.am b/Makefile_util.am
+index c2cd1c1..cf863fa 100644
+--- a/Makefile_util.am
++++ b/Makefile_util.am
+@@ -52,6 +52,7 @@ endif
+ checkasm_checkasm_SOURCES = \
+     checkasm/rasterizer.c \
+     checkasm/blend_bitmaps.c \
++    checkasm/shift.c \
+     checkasm/be_blur.c \
+     checkasm/blur.c \
+     checkasm/checkasm.h checkasm/checkasm.c \
+diff --git a/checkasm/checkasm.c b/checkasm/checkasm.c
+index 857938b..0ddd74d 100644
+--- a/checkasm/checkasm.c
++++ b/checkasm/checkasm.c
+@@ -59,6 +59,7 @@ static const struct {
+ } tests[] = {
+     { "rasterizer", checkasm_check_rasterizer },
+     { "blend_bitmaps", checkasm_check_blend_bitmaps },
++    { "shift", checkasm_check_shift },
+     { "be_blur", checkasm_check_be_blur },
+     { "blur", checkasm_check_blur },
+     { 0 }
+diff --git a/checkasm/checkasm.h b/checkasm/checkasm.h
+index 3cd7c24..9413019 100644
+--- a/checkasm/checkasm.h
++++ b/checkasm/checkasm.h
+@@ -61,6 +61,7 @@ int xor128_rand(void);
+ 
+ void checkasm_check_rasterizer(unsigned cpu_flag);
+ void checkasm_check_blend_bitmaps(unsigned cpu_flag);
++void checkasm_check_shift(unsigned cpu_flag);
+ void checkasm_check_be_blur(unsigned cpu_flag);
+ void checkasm_check_blur(unsigned cpu_flag);
+ 
+diff --git a/checkasm/meson.build b/checkasm/meson.build
+index c8d8acf..5a27ce2 100644
+--- a/checkasm/meson.build
++++ b/checkasm/meson.build
+@@ -2,6 +2,7 @@ checkasm_src = files(
+     'checkasm.c',
+     'rasterizer.c',
+     'blend_bitmaps.c',
++    'shift.c',
+     'be_blur.c',
+     'blur.c',
+ )
+diff --git a/checkasm/shift.c b/checkasm/shift.c
+new file mode 100644
+index 0000000..9dca4ec
+--- /dev/null
++++ b/checkasm/shift.c
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (C) 2026 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "ass_compat.h"
++
++#include "checkasm.h"
++
++#include <string.h>
++
++#define HEIGHT 8
++#define STRIDE 64
++#define MIN_WIDTH 2
++#define REP_COUNT 8
++
++static void check_shift(ShiftFunc func)
++{
++    ALIGN(uint8_t buf_ref[STRIDE * HEIGHT], 32);
++    ALIGN(uint8_t buf_new[STRIDE * HEIGHT], 32);
++    declare_func(void,
++                 uint8_t *buf, ptrdiff_t stride,
++                 size_t width, size_t height,
++                 int shift_x, int shift_y);
++
++    if (check_func(func, "shift")) {
++        for (int w = MIN_WIDTH; w <= STRIDE; w++) {
++            for(int rep = 0; rep < REP_COUNT; rep++) {
++                memset(buf_ref, 0, sizeof(buf_ref));
++                memset(buf_new, 0, sizeof(buf_new));
++                for (int y = 0; y < HEIGHT; y++) {
++                    for (int x = 0; x < w; x++)
++                        buf_ref[y * STRIDE + x] = buf_new[y * STRIDE + x] = rnd();
++                }
++
++                int shift_x = rnd() & 63;
++                int shift_y = rnd() & 63;
++
++                call_ref(buf_ref, STRIDE, w, HEIGHT, shift_x, shift_y);
++                call_new(buf_new, STRIDE, w, HEIGHT, shift_x, shift_y);
++
++                if (memcmp(buf_ref, buf_new, sizeof(buf_ref))) {
++                    fail();
++                    break;
++                }
++            }
++        }
++
++        bench_new(buf_new, STRIDE, STRIDE, HEIGHT, 42, 13);
++    }
++
++    report("shift");
++}
++
++void checkasm_check_shift(unsigned cpu_flag)
++{
++    BitmapEngine engine = ass_bitmap_engine_init(cpu_flag);
++    check_shift(engine.shift);
++}
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index ec7bff9..6296863 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -27,6 +27,7 @@ libass_libass_internal_la_SOURCES = \
+     libass/ass_arabic_charmap.h libass/ass_arabic_charmap.c \
+     libass/c/rasterizer_template.h libass/c/c_rasterizer.c \
+     libass/c/c_blend_bitmaps.c \
++    libass/c/c_shift.c \
+     libass/c/c_be_blur.c \
+     libass/c/blur_template.h libass/c/c_blur.c \
+     libass/wyhash.h
+@@ -36,6 +37,7 @@ if X86
+ libass_libass_internal_la_SOURCES += \
+     libass/x86/rasterizer.asm \
+     libass/x86/blend_bitmaps.asm \
++    libass/x86/shift.asm \
+     libass/x86/be_blur.asm \
+     libass/x86/blur.asm \
+     libass/x86/cpuid.h libass/x86/cpuid.asm
+@@ -44,6 +46,7 @@ if AARCH64
+ libass_libass_internal_la_SOURCES += \
+     libass/aarch64/rasterizer.S \
+     libass/aarch64/blend_bitmaps.S \
++    libass/aarch64/shift.S \
+     libass/aarch64/be_blur.S \
+     libass/aarch64/blur.S \
+     libass/aarch64/asm.S
+diff --git a/libass/aarch64/shift.S b/libass/aarch64/shift.S
+new file mode 100644
+index 0000000..90ee103
+--- /dev/null
++++ b/libass/aarch64/shift.S
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (C) 2026 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "asm.S"
++
++/*
++ * shift_x
++ * Perform subpixel shift along X axis
++ */
++
++.macro shift_x dst1, dst2, src1, src2, mul, vtmp1, vtmp2
++    ext \vtmp1\().16b, \src1\().16b, \src2\().16b, 1
++    ushll \dst1\().8h, \src1\().8b, 6
++    usubl \vtmp2\().8h, \src1\().8b, \vtmp1\().8b
++    mls \dst1\().8h, \vtmp2\().8h, \mul\().h[0]
++    ushll2 \dst2\().8h, \src1\().16b, 6
++    usubl2 \vtmp2\().8h, \src1\().16b, \vtmp1\().16b
++    mls \dst2\().8h, \vtmp2\().8h, \mul\().h[0]
++.endm
++
++/*
++ * shift_y
++ * Perform subpixel shift along Y axis
++ */
++
++.macro shift_y src11, src12, src21, src22, mul, mode=
++.ifb \mode
++    sub \src21\().8h, \src11\().8h, \src21\().8h
++    sqdmulh \src21\().8h, \src21\().8h, \mul\().h[1]
++.else
++    sqdmulh \src21\().8h, \src11\().8h, \mul\().h[1]
++.endif
++    sub \src11\().8h, \src11\().8h, \src21\().8h
++    uqrshrn \src11\().8b, \src11\().8h, 6
++.ifb \mode
++    sub \src22\().8h, \src12\().8h, \src22\().8h
++    sqdmulh \src22\().8h, \src22\().8h, \mul\().h[1]
++.else
++    sqdmulh \src22\().8h, \src12\().8h, \mul\().h[1]
++.endif
++    sub \src12\().8h, \src12\().8h, \src22\().8h
++    uqrshrn2 \src11\().16b, \src12\().8h, 6
++.endm
++
++/*
++ * void ass_shift_c(uint8_t *buf, ptrdiff_t stride,
++ *                  size_t width, size_t height, int shift_x, int shift_y);
++ */
++
++function shift_neon, export=1
++    add w4, w4, w5, lsl 16 + 9
++    mov v6.s[0], w4
++    add x4, x0, x1
++    sub x1, x1, x2
++    and x1, x1, ~15
++    sub x3, x3, 1
++    movi v7.16b, 0
++
++0:
++    mov x6, x0
++    ld1 {v0.16b}, [x0], #16
++    ld1 {v1.16b}, [x4], #16
++    subs x5, x2, 16
++    b.ls 2f
++1:
++    mov v16.16b, v0.16b
++    ld1 {v0.16b}, [x0], #16
++    shift_x v2, v3, v16, v0, v6, v17, v18
++    mov v16.16b, v1.16b
++    ld1 {v1.16b}, [x4], #16
++    shift_x v4, v5, v16, v1, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6
++    st1 {v2.16b}, [x6], #16
++    subs x5, x5, 16
++    b.hi 1b
++2:
++    shift_x v2, v3, v0, v7, v6, v17, v18
++    shift_x v4, v5, v1, v7, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6
++    st1 {v2.16b}, [x6]
++    add x0, x0, x1
++    add x4, x4, x1
++    subs x3, x3, 1
++    b.hi 0b
++
++    mov x6, x0
++    ld1 {v0.16b}, [x0], #16
++    subs x5, x2, 16
++    b.ls 4f
++3:
++    mov v16.16b, v0.16b
++    ld1 {v0.16b}, [x0], #16
++    shift_x v2, v3, v16, v0, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6, last
++    st1 {v2.16b}, [x6], #16
++    subs x5, x5, 16
++    b.hi 3b
++4:
++    shift_x v2, v3, v0, v7, v6, v17, v18
++    shift_y v2, v3, v4, v5, v6, last
++    st1 {v2.16b}, [x6]
++    ret
++endfunc
+diff --git a/libass/ass_bitmap.c b/libass/ass_bitmap.c
+index 41df5e1..ef970b6 100644
+--- a/libass/ass_bitmap.c
++++ b/libass/ass_bitmap.c
+@@ -163,10 +163,10 @@ bool ass_outline_to_bitmap(RenderContext *state, Bitmap *bm,
+         return false;
+ 
+     // enlarge by 1/64th of pixel to bypass slow rasterizer path, add 1 pixel for shift_bitmap
+-    int32_t x_min = (rst->bbox.x_min -   1) >> 6;
+-    int32_t y_min = (rst->bbox.y_min -   1) >> 6;
+-    int32_t x_max = (rst->bbox.x_max + 127) >> 6;
+-    int32_t y_max = (rst->bbox.y_max + 127) >> 6;
++    int32_t x_min = (rst->bbox.x_min - 64) >> 6;
++    int32_t y_min = (rst->bbox.y_min - 64) >> 6;
++    int32_t x_max = (rst->bbox.x_max + 64) >> 6;
++    int32_t y_max = (rst->bbox.y_max + 64) >> 6;
+     int32_t w = x_max - x_min;
+     int32_t h = y_max - y_min;
+ 
+@@ -224,37 +224,20 @@ void ass_fix_outline(Bitmap *bm_g, Bitmap *bm_o)
+ }
+ 
+ /**
+- * \brief Shift a bitmap by the fraction of a pixel in x and y direction
++ * \brief Shift a bitmap in x and y direction by amount
+  * expressed in 26.6 fixed point
+  */
+-void ass_shift_bitmap(Bitmap *bm, int shift_x, int shift_y)
++void ass_shift_bitmap(const BitmapEngine *engine, Bitmap *bm,
++                      int32_t shift_x, int32_t shift_y)
+ {
+-    assert((shift_x & ~63) == 0 && (shift_y & ~63) == 0);
+-
+-    if (!bm->buffer)
++    // Works right even for negative offsets
++    // '>>' rounds toward negative infinity, '&' returns correct remainder
++    bm->left -= -shift_x >> 6;
++    bm->top  -= -shift_y >> 6;
++    int x = -shift_x & 63;
++    int y = -shift_y & 63;
++    if (!bm->buffer || !(x | y))
+         return;
+ 
+-    int32_t w = bm->w, h = bm->h;
+-    ptrdiff_t s = bm->stride;
+-    uint8_t *buf = bm->buffer;
+-
+-    // Shift in x direction
+-    if (shift_x)
+-        for (int32_t y = 0; y < h; y++) {
+-            for (int32_t x = w - 1; x > 0; x--) {
+-                uint8_t b = buf[x + y * s - 1] * shift_x >> 6;
+-                buf[x + y * s - 1] -= b;
+-                buf[x + y * s] += b;
+-            }
+-        }
+-
+-    // Shift in y direction
+-    if (shift_y)
+-        for (int32_t x = 0; x < w; x++) {
+-            for (int32_t y = h - 1; y > 0; y--) {
+-                uint8_t b = buf[x + y * s - s] * shift_y >> 6;
+-                buf[x + y * s - s] -= b;
+-                buf[x + y * s] += b;
+-            }
+-        }
++    engine->shift(bm->buffer, bm->stride, bm->w, bm->h, x, y);
+ }
+diff --git a/libass/ass_bitmap.h b/libass/ass_bitmap.h
+index c337bf1..1605663 100644
+--- a/libass/ass_bitmap.h
++++ b/libass/ass_bitmap.h
+@@ -48,7 +48,7 @@ void ass_synth_blur(const BitmapEngine *engine, Bitmap *bm,
+                     int be, double blur_r2x, double blur_r2y);
+ 
+ bool ass_gaussian_blur(const BitmapEngine *engine, Bitmap *bm, double r2x, double r2y);
+-void ass_shift_bitmap(Bitmap *bm, int shift_x, int shift_y);
++void ass_shift_bitmap(const BitmapEngine *engine, Bitmap *bm, int32_t shift_x, int32_t shift_y);
+ void ass_fix_outline(Bitmap *bm_g, Bitmap *bm_o);
+ 
+ #endif                          /* LIBASS_BITMAP_H */
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 847adc4..e7cbdf3 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -47,6 +47,7 @@
+     BitmapBlendFunc ass_add_bitmaps_  ## suffix; \
+     BitmapBlendFunc ass_imul_bitmaps_ ## suffix; \
+     BitmapMulFunc   ass_mul_bitmaps_  ## suffix; \
++    ShiftFunc       ass_shift_        ## suffix; \
+     BeBlurFunc      ass_be_blur_      ## suffix;
+ 
+ #define GENERIC_FUNCTION(name, suffix) \
+@@ -56,6 +57,7 @@
+     GENERIC_FUNCTION(add_bitmaps,  suffix) \
+     GENERIC_FUNCTION(imul_bitmaps, suffix) \
+     GENERIC_FUNCTION(mul_bitmaps,  suffix) \
++    GENERIC_FUNCTION(shift,        suffix) \
+     GENERIC_FUNCTION(be_blur,      suffix)
+ 
+ 
+@@ -180,6 +182,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         if (flags & ASS_CPU_FLAG_X86_SSSE3) {
+             ALL_PROTOTYPES(16, ssse3)
+             RASTERIZER_FUNCTION(fill_generic, ssse3)
++            GENERIC_FUNCTION(shift, ssse3)
+             GENERIC_FUNCTION(be_blur, ssse3)
+             BLUR_FUNCTION(shrink_horz, 16, ssse3)
+             BLUR_FUNCTION(expand_horz, 16, ssse3)
+diff --git a/libass/ass_bitmap_engine.h b/libass/ass_bitmap_engine.h
+index 68d7aa8..a0958db 100644
+--- a/libass/ass_bitmap_engine.h
++++ b/libass/ass_bitmap_engine.h
+@@ -48,6 +48,8 @@ typedef void BitmapMulFunc(uint8_t *restrict dst, ptrdiff_t dst_stride,
+                            const uint8_t *restrict src2, ptrdiff_t src2_stride,
+                            size_t width, size_t height);
+ 
++typedef void ShiftFunc(uint8_t *restrict buf, ptrdiff_t stride,
++                       size_t width, size_t height, int shift_x, int shift_y);
+ typedef void BeBlurFunc(uint8_t *restrict buf, ptrdiff_t stride,
+                         size_t width, size_t height, uint16_t *restrict tmp);
+ 
+@@ -76,6 +78,9 @@ typedef struct {
+     BitmapBlendFunc *add_bitmaps, *imul_bitmaps;
+     BitmapMulFunc *mul_bitmaps;
+ 
++    // shift function
++    ShiftFunc *shift;
++
+     // be blur function
+     BeBlurFunc *be_blur;
+ 
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index 18f856a..d065d05 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -39,7 +39,6 @@
+ #define MAX_LINES_INITIAL 64
+ #define MAX_BITMAPS_INITIAL 16
+ #define MAX_SUB_BITMAPS_INITIAL 64
+-#define SUBPIXEL_MASK 63
+ #define STROKER_PRECISION 16     // stroker error in integer units, unrelated to final accuracy
+ #define RASTERIZER_PRECISION 16  // rasterizer spline approximation error in 1/64 pixel units
+ #define POSITION_PRECISION 8.0   // rough estimate of transform error in 1/64 pixel units
+@@ -2740,12 +2739,7 @@ size_t ass_composite_construct(void *key, void *value, void *priv)
+         } else {
+             ass_copy_bitmap(&render_priv->engine, &v->bm_s, &v->bm);
+         }
+-
+-        // Works right even for negative offsets
+-        // '>>' rounds toward negative infinity, '&' returns correct remainder
+-        v->bm_s.left += k->filter.shadow.x >> 6;
+-        v->bm_s.top  += k->filter.shadow.y >> 6;
+-        ass_shift_bitmap(&v->bm_s, k->filter.shadow.x & SUBPIXEL_MASK, k->filter.shadow.y & SUBPIXEL_MASK);
++        ass_shift_bitmap(&render_priv->engine, &v->bm_s, k->filter.shadow.x, k->filter.shadow.y);
+     }
+ 
+     if ((flags & FILTER_FILL_IN_SHADOW) && !(flags & FILTER_FILL_IN_BORDER))
+diff --git a/libass/c/c_shift.c b/libass/c/c_shift.c
+new file mode 100644
+index 0000000..65d5fb1
+--- /dev/null
++++ b/libass/c/c_shift.c
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (C) 2024-2026 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "config.h"
++#include "ass_compat.h"
++#include "ass_utils.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++
++#define ALIGNMENT  16
++
++/**
++ * \brief Shift a bitmap by the fraction of a pixel in negative x and y direction
++ * expressed in 26.6 fixed point
++ */
++void ass_shift_c(uint8_t *restrict buf, ptrdiff_t stride,
++                 size_t width, size_t height, int shift_x, int shift_y)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++    ASSUME(!(shift_x & ~63) && !(shift_y & ~63));
++    ASSUME(width > 1 && height > 1);
++
++    int16_t sy = shift_y << 9;
++    for (int32_t y = 1; y < height; y++) {
++        for (int32_t x = 1; x < width; x++) {
++            int16_t tmp1 = 64 * buf[x - 1] - (buf[x - 1] - buf[x]) * (int16_t) shift_x;
++            int16_t tmp2 = 64 * buf[x + stride - 1] - (buf[x + stride - 1] - buf[x + stride]) * (int16_t) shift_x;
++            buf[x - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * (tmp1 - tmp2)) * (int32_t) sy >> 16) + 32) >> 6;
++        }
++        int16_t tmp1 = 64 * buf[width - 1] - buf[width - 1] * (int16_t) shift_x;
++        int16_t tmp2 = 64 * buf[width + stride - 1] - buf[width + stride - 1] * (int16_t) shift_x;
++        buf[width - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * (tmp1 - tmp2)) * (int32_t) sy >> 16) + 32) >> 6;
++        buf += stride;
++    }
++    for (int32_t x = 1; x < width; x++) {
++        int16_t tmp1 = 64 * buf[x - 1] - (buf[x - 1] - buf[x]) * (int16_t) shift_x;
++        buf[x - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * tmp1) * (int32_t) sy >> 16) + 32) >> 6;
++    }
++    int16_t tmp1 = 64 * buf[width - 1] - buf[width - 1] * (int16_t) shift_x;
++    buf[width - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * tmp1) * (int32_t) sy >> 16) + 32) >> 6;
++}
+diff --git a/libass/meson.build b/libass/meson.build
+index 9eda958..a0e42c6 100644
+--- a/libass/meson.build
++++ b/libass/meson.build
+@@ -29,6 +29,7 @@ src_x86 = files(
+     'x86/blur.asm',
+     'x86/cpuid.asm',
+     'x86/rasterizer.asm',
++    'x86/shift.asm',
+ )
+ src_aarch64 = files(
+     'aarch64/asm.S',
+@@ -36,6 +37,7 @@ src_aarch64 = files(
+     'aarch64/blend_bitmaps.S',
+     'aarch64/blur.S',
+     'aarch64/rasterizer.S',
++    'aarch64/shift.S',
+ )
+ src_fontconfig = files('ass_fontconfig.c')
+ src_directwrite = files('ass_directwrite.c')
+@@ -46,6 +48,7 @@ libass_src = files(
+     'c/c_blend_bitmaps.c',
+     'c/c_blur.c',
+     'c/c_rasterizer.c',
++    'c/c_shift.c',
+     'ass.c',
+     'ass_arabic_charmap.c',
+     'ass_bitmap.c',
+diff --git a/libass/x86/shift.asm b/libass/x86/shift.asm
+new file mode 100644
+index 0000000..584be0d
+--- /dev/null
++++ b/libass/x86/shift.asm
+@@ -0,0 +1,280 @@
++;******************************************************************************
++;* shift.asm: SSE2/AVX2 subpixel bitmap shift
++;******************************************************************************
++;* Copyright (C) 2026 libass contributors
++;*
++;* This file is part of libass.
++;*
++;* Permission to use, copy, modify, and distribute this software for any
++;* purpose with or without fee is hereby granted, provided that the above
++;* copyright notice and this permission notice appear in all copies.
++;*
++;* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++;* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++;* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++;* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++;* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++;* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++;******************************************************************************
++
++%include "x86/utils.asm"
++
++SECTION .text
++
++;------------------------------------------------------------------------------
++; SHIFT_X 1:m_dst, 2:m_src1, 3:m_src2,
++;         4:m_tmp, 5:m_mul(64), 6:r_mul(32), 6:mode
++; Perform subpixel shift along X axis
++;------------------------------------------------------------------------------
++
++%macro SHIFT_X 7
++%ifidn %7, even
++    %assign %%mode 0
++%elifidn %7, odd
++    %assign %%mode 1
++%elifidn %7, last
++    %assign %%mode 2
++%else
++    %error "even/odd/last expected"
++%endif
++
++%if %%mode == 2 && mmsize != 32
++    psrldq m%1, m%2, 2
++%else
++    PALIGNR m%1,m%3,m%2, m%4, 2
++%endif
++%if %%mode == 1 && mmsize == 32
++    mova m%3, m%4
++%endif
++    psubw m%1, m%2
++%if ARCH_X86_64
++    pmullw m%1, m%5
++%else
++    BCASTD %4, %6d
++    pmullw m%1, m%4
++%endif
++%if %%mode == 0 && mmsize == 32
++    psllw m%4, m%2, 6
++    paddw m%1, m%4
++%else
++    psllw m%2, 6
++    paddw m%1, m%2
++%endif
++%endmacro
++
++;------------------------------------------------------------------------------
++; SHIFT_Y 1:m_dst/m_src1, 2:m_src2,
++;         3:m_tmp, 4:m_mul(64), 5:r_mul(32), 6:m_w32(64), 7:mode
++; Perform subpixel shift along Y axis
++;------------------------------------------------------------------------------
++
++%macro SHIFT_Y 6-7
++%ifidn %7, last
++    paddw m%3, m%1, m%1
++%else
++    psubw m%3, m%1, m%2
++    paddw m%3, m%3
++%endif
++%if ARCH_X86_64
++    pmulhw m%3, m%4
++    psubw m%1, m%3
++    paddw m%1, m%6
++%else
++    BCASTD %2, %5d
++    pmulhw m%3, m%2
++    psubw m%1, m%3
++    pcmpeqw m%2, m%2
++    psllw m%2, 5
++    psubw m%1, m%2
++%endif
++    psrlw m%1, 6
++%endmacro
++
++;------------------------------------------------------------------------------
++; SHIFT
++; void ass_shift_c(uint8_t *buf, ptrdiff_t stride,
++;                  size_t width, size_t height, int shift_x, int shift_y);
++;------------------------------------------------------------------------------
++
++%macro SHIFT 0
++%if ARCH_X86_64
++cglobal shift, 6,6,13
++    DECLARE_REG_TMP 5
++%else
++cglobal shift, 6,7,8
++    DECLARE_REG_TMP 6
++    sub r3, 1
++%endif
++
++    lea r0, [r0 + r2]
++    neg r2
++    imul r3, r1
++    add r3, r0
++
++%if ARCH_X86_64
++    pxor m9, m9
++    BCASTW 10, r4d
++    shl r5d, 9
++    BCASTW 11, r5d
++    mov r4d, 32
++    BCASTW 12, r4d
++    lea r4, [r0 + r1]
++%else
++    imul r4d, 0x10001
++    imul r5d, 0x10001 << 9
++%endif
++
++.height_loop:
++    mov t0, r2
++    mova m0, [r0 + t0]
++%if ARCH_X86_64
++    punpcklbw m2, m0, m9
++    punpckhbw m4, m0, m9
++    mova m0, [r4 + t0]
++    punpcklbw m3, m0, m9
++    punpckhbw m5, m0, m9
++%else
++    pxor m7, m7
++    add r0, r1
++    punpcklbw m2, m0, m7
++    punpckhbw m4, m0, m7
++    mova m0, [r0 + t0]
++    sub r0, r1
++    punpcklbw m3, m0, m7
++    punpckhbw m5, m0, m7
++%endif
++    jmp .loop_entry
++
++.width_loop:
++    mova m0, [r0 + t0]
++%if ARCH_X86_64
++
++%if mmsize == 32
++    punpcklbw m7, m0, m9
++    vperm2i128 m2, m2, m7, 0x21
++%else
++    punpcklbw m2, m0, m9
++%endif
++    SHIFT_X 6,4,2, 7,10,r4, odd
++    punpckhbw m4, m0, m9
++
++    mova m0, [r4 + t0]
++%if mmsize == 32
++    punpcklbw m8, m0, m9
++    vperm2i128 m3, m3, m8, 0x21
++%else
++    punpcklbw m3, m0, m9
++%endif
++    SHIFT_X 7,5,3, 8,10,r4, odd
++    punpckhbw m5, m0, m9
++
++%else
++
++    add r0, r1
++    pxor m6, m6
++%if mmsize == 32
++    punpcklbw m7, m0, m6
++    vperm2i128 m2, m2, m7, 0x21
++%else
++    punpcklbw m2, m0, m6
++%endif
++    SHIFT_X 6,4,2, 7,10,r4, odd
++
++    mova m7, [r0 + t0]
++    sub r0, r1
++    punpckhqdq m4, m0, m7
++    pxor m0, m0
++%if mmsize == 32
++    punpcklbw m0, m7, m0
++    vperm2i128 m3, m3, m0, 0x21
++%else
++    punpcklbw m3, m7, m0
++%endif
++    SHIFT_X 7,5,3, 0,10,r4, odd
++    pxor m0, m0
++    punpckhbw m5, m4, m0
++    punpcklbw m4, m4, m0
++
++%endif
++
++    SHIFT_Y 6,7, 0,11,r5,12
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++
++.loop_entry:
++    SHIFT_X 1,2,4, 0,10,r4, even
++    SHIFT_X 7,3,5, 0,10,r4, even
++    SHIFT_Y 1,7, 0,11,r5,12
++
++    add t0, mmsize
++    jnc .width_loop
++
++%if mmsize == 32
++    vperm2i128 m2, m2, m2, 0x81
++    vperm2i128 m3, m3, m2, 0x81
++%endif
++    SHIFT_X 6,4,2, 0,10,r4, last
++    SHIFT_X 7,5,3, 0,10,r4, last
++    SHIFT_Y 6,7, 0,11,r5,12
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++
++%if ARCH_X86_64
++    mov r0, r4
++    add r4, r1
++    cmp r4, r3
++%else
++    add r0, r1
++    cmp r0, r3
++%endif
++    jl .height_loop
++
++    mov t0, r2
++    mova m0, [r0 + t0]
++%if !ARCH_X86_64
++    pxor m3, m3
++    %define m9 m3
++%endif
++    punpcklbw m2, m0, m9
++    punpckhbw m4, m0, m9
++    jmp .last_loop_entry
++
++.last_width_loop:
++    mova m0, [r0 + t0]
++%if mmsize == 32
++    punpcklbw m7, m0, m9
++    vperm2i128 m2, m2, m7, 0x21
++%else
++    punpcklbw m2, m0, m9
++%endif
++    SHIFT_X 6,4,2, 7,10,r4, odd
++    punpckhbw m4, m0, m9
++
++    SHIFT_Y 6,7, 0,11,r5,12, last
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++
++.last_loop_entry:
++    SHIFT_X 1,2,4, 0,10,r4, even
++    SHIFT_Y 1,7, 0,11,r5,12, last
++
++    add t0, mmsize
++    jnc .last_width_loop
++
++%if mmsize == 32
++    vperm2i128 m2, m2, m2, 0x81
++%endif
++    SHIFT_X 6,4,2, 0,10,r4, last
++    SHIFT_Y 6,7, 0,11,r5,12, last
++    packuswb m1, m6
++    mova [r0 + t0 - mmsize], m1
++    RET
++%endmacro
++
++INIT_XMM sse2
++SHIFT
++INIT_XMM ssse3
++SHIFT
++INIT_YMM avx2
++SHIFT
