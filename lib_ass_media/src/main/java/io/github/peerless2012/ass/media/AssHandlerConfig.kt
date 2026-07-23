@@ -1,6 +1,6 @@
 package io.github.peerless2012.ass.media
 
-data class AssHandlerConfig(
+data class AssHandlerConfig @JvmOverloads constructor(
     val glyphSize: Int = 10_000,
     val cacheSize: Int = 128,
 
