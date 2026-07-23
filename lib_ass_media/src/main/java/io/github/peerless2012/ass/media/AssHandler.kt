@@ -72,7 +72,7 @@ class AssHandler(
 
     /** Maximum cumulative size of embedded fonts for one media item. */
     @Volatile
-    var maxEmbeddedFontBytes = 32L * 1024 * 1024
+    var maxEmbeddedFontBytes = config.maxEmbeddedFontBytes
         set(value) {
             require(value >= 0) { "maxEmbeddedFontBytes must not be negative" }
             field = value

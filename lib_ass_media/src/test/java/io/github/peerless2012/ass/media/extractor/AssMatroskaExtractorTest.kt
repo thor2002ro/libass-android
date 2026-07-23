@@ -7,6 +7,7 @@ import androidx.media3.extractor.DefaultExtractorInput
 import androidx.media3.extractor.ExtractorInput
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import io.github.peerless2012.ass.media.AssHandler
+import io.github.peerless2012.ass.media.AssHandlerConfig
 import io.github.peerless2012.ass.media.parser.AssSubtitleParserFactory
 import io.github.peerless2012.ass.media.render.AssRenderer
 import io.github.peerless2012.ass.media.type.AssRenderType
@@ -77,6 +78,18 @@ class AssMatroskaExtractorTest {
         val handler = AssHandler(AssRenderType.CUES).apply {
             maxEmbeddedFontBytes = 2
         }
+
+        readEbml(TestExtractor(handler), fontAttachment(byteArrayOf(1, 2, 3)))
+
+        assertTrue(handler.pendingFonts().isEmpty())
+    }
+
+    @Test
+    fun `embedded font budget can be configured at construction`() {
+        val handler = AssHandler(
+            AssRenderType.CUES,
+            AssHandlerConfig(maxEmbeddedFontBytes = 2)
+        )
 
         readEbml(TestExtractor(handler), fontAttachment(byteArrayOf(1, 2, 3)))
 
