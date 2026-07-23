@@ -29,6 +29,18 @@ data class AssPerformanceStats(
     /** Sum of subtitle image areas returned across all frames, in pixels. */
     val totalBitmapPixels: Long = 0,
 
+    /** Atlas pages uploaded across content-changing atlas frames. */
+    val atlasUploadPageCount: Long = 0,
+
+    /** Largest number of atlas pages uploaded by one content-changing frame. */
+    val maxAtlasUploadPageCount: Int = 0,
+
+    /** Largest uploaded atlas page area, in pixels. */
+    val maxAtlasUploadPagePixels: Long = 0,
+
+    /** Sum of uploaded atlas page areas, in pixels. */
+    val totalAtlasUploadPagePixels: Long = 0,
+
     /** Synchronous executor renders that missed the wait budget. */
     val executorTimeoutCount: Long = 0,
 
@@ -59,7 +71,7 @@ data class AssPerformanceStats(
     /** Single-line summary for app-owned debug UI or manual logging. */
     fun toSummaryString(): String = String.format(
         Locale.US,
-        "fps=%.1f renderMs(avg/min/max/last)=%.2f/%.2f/%.2f/%.2f frames=%d changed=%d changedRatio=%.2f empty=%d images=%d maxImages=%d slow=%d executorTimeouts=%d superseded=%d maxBitmapPixels=%d totalBitmapPixels=%d",
+        "fps=%.1f renderMs(avg/min/max/last)=%.2f/%.2f/%.2f/%.2f frames=%d changed=%d changedRatio=%.2f empty=%d images=%d maxImages=%d slow=%d executorTimeouts=%d superseded=%d maxBitmapPixels=%d totalBitmapPixels=%d atlasUploadPages=%d maxAtlasUploadPages=%d maxAtlasUploadPixels=%d totalAtlasUploadPixels=%d",
         fps,
         averageRenderMs,
         minRenderMs,
@@ -75,7 +87,11 @@ data class AssPerformanceStats(
         executorTimeoutCount,
         supersededRequestCount,
         maxBitmapPixels,
-        totalBitmapPixels
+        totalBitmapPixels,
+        atlasUploadPageCount,
+        maxAtlasUploadPageCount,
+        maxAtlasUploadPagePixels,
+        totalAtlasUploadPagePixels
     )
 }
 
@@ -129,6 +145,10 @@ internal class AssPerformanceStatsRecorder(
     private var maxImageCount = 0
     private var maxBitmapPixels = 0L
     private var totalBitmapPixels = 0L
+    private var atlasUploadPageCount = 0L
+    private var maxAtlasUploadPageCount = 0
+    private var maxAtlasUploadPagePixels = 0L
+    private var totalAtlasUploadPagePixels = 0L
     private var executorTimeoutCount = 0L
     private var supersededRequestCount = 0L
     private var totalRenderNs = 0L
@@ -149,6 +169,7 @@ internal class AssPerformanceStatsRecorder(
     fun record(renderDurationNs: Long, frame: AssAtlasFrame?) {
         val imageCount = frame?.imageCount ?: 0
         recordHeader(renderDurationNs, frame?.changed ?: AssAtlasFrame.CHANGE_NONE, imageCount)
+        recordAtlasUploads(frame)
         val quads = frame?.quads ?: return
         var offset = 0
         repeat(imageCount) {
@@ -198,6 +219,23 @@ internal class AssPerformanceStatsRecorder(
         totalBitmapPixels += pixels
     }
 
+    private fun recordAtlasUploads(frame: AssAtlasFrame?) {
+        val pages = frame?.pages ?: return
+        val pageCount = minOf(pages.size, frame.pageWidths.size, frame.pageHeights.size)
+        if (pageCount <= 0) return
+        atlasUploadPageCount += pageCount
+        maxAtlasUploadPageCount = maxOf(maxAtlasUploadPageCount, pageCount)
+        repeat(pageCount) { page ->
+            recordAtlasUploadPagePixels(frame.pageWidths[page].toLong() * frame.pageHeights[page])
+        }
+    }
+
+    private fun recordAtlasUploadPagePixels(pixels: Long) {
+        if (pixels <= 0L) return
+        maxAtlasUploadPagePixels = maxOf(maxAtlasUploadPagePixels, pixels)
+        totalAtlasUploadPagePixels += pixels
+    }
+
     @Synchronized
     fun recordExecutorTimeout() {
         executorTimeoutCount++
@@ -220,6 +258,10 @@ internal class AssPerformanceStatsRecorder(
         maxImageCount = 0
         maxBitmapPixels = 0L
         totalBitmapPixels = 0L
+        atlasUploadPageCount = 0L
+        maxAtlasUploadPageCount = 0
+        maxAtlasUploadPagePixels = 0L
+        totalAtlasUploadPagePixels = 0L
         executorTimeoutCount = 0L
         supersededRequestCount = 0L
         totalRenderNs = 0L
@@ -240,6 +282,10 @@ internal class AssPerformanceStatsRecorder(
             maxImageCount = maxImageCount,
             maxBitmapPixels = maxBitmapPixels,
             totalBitmapPixels = totalBitmapPixels,
+            atlasUploadPageCount = atlasUploadPageCount,
+            maxAtlasUploadPageCount = maxAtlasUploadPageCount,
+            maxAtlasUploadPagePixels = maxAtlasUploadPagePixels,
+            totalAtlasUploadPagePixels = totalAtlasUploadPagePixels,
             executorTimeoutCount = executorTimeoutCount,
             supersededRequestCount = supersededRequestCount,
             elapsedMs = elapsedNs.toMs(),

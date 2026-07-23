@@ -27,6 +27,10 @@ class AssPerformanceStatsRecorderTest {
         assertEquals(2, stats.maxImageCount)
         assertEquals(20L, stats.maxBitmapPixels)
         assertEquals(26L, stats.totalBitmapPixels)
+        assertEquals(0L, stats.atlasUploadPageCount)
+        assertEquals(0, stats.maxAtlasUploadPageCount)
+        assertEquals(0L, stats.maxAtlasUploadPagePixels)
+        assertEquals(0L, stats.totalAtlasUploadPagePixels)
         assertEquals(1L, stats.executorTimeoutCount)
         assertEquals(1L, stats.supersededRequestCount)
         assertEquals(2.0, stats.fps, 0.01)
@@ -36,7 +40,7 @@ class AssPerformanceStatsRecorderTest {
         assertEquals(3.0, stats.maxRenderMs, 0.01)
         assertEquals(3.0, stats.lastRenderMs, 0.01)
         assertEquals(
-            "fps=2.0 renderMs(avg/min/max/last)=2.00/1.00/3.00/3.00 frames=2 changed=1 changedRatio=0.50 empty=1 images=2 maxImages=2 slow=1 executorTimeouts=1 superseded=1 maxBitmapPixels=20 totalBitmapPixels=26",
+            "fps=2.0 renderMs(avg/min/max/last)=2.00/1.00/3.00/3.00 frames=2 changed=1 changedRatio=0.50 empty=1 images=2 maxImages=2 slow=1 executorTimeouts=1 superseded=1 maxBitmapPixels=20 totalBitmapPixels=26 atlasUploadPages=0 maxAtlasUploadPages=0 maxAtlasUploadPixels=0 totalAtlasUploadPixels=0",
             stats.toSummaryString()
         )
     }
@@ -55,9 +59,9 @@ class AssPerformanceStatsRecorderTest {
     fun recordsAtlasFrames() {
         val collector = AssPerformanceStatsCollector()
         val frame = AssAtlasFrame(
-            pages = null,
-            pageWidths = intArrayOf(16),
-            pageHeights = intArrayOf(16),
+            pages = arrayOf(ByteArray(256), ByteArray(32)),
+            pageWidths = intArrayOf(16, 8),
+            pageHeights = intArrayOf(16, 4),
             quads = intArrayOf(
                 0, 0, 3, 4, 0, 0, 0, 0,
                 8, 8, 5, 6, 0, 0, 4, 0,
@@ -75,6 +79,10 @@ class AssPerformanceStatsRecorderTest {
         assertEquals(2, stats.maxImageCount)
         assertEquals(30L, stats.maxBitmapPixels)
         assertEquals(42L, stats.totalBitmapPixels)
+        assertEquals(2L, stats.atlasUploadPageCount)
+        assertEquals(2, stats.maxAtlasUploadPageCount)
+        assertEquals(256L, stats.maxAtlasUploadPagePixels)
+        assertEquals(288L, stats.totalAtlasUploadPagePixels)
     }
 
     @Test
