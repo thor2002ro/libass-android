@@ -9,7 +9,7 @@ android_sdk_packages=(
     "platforms;android-36"
     "build-tools;36.0.0"
     "cmake;3.22.1"
-    "ndk;28.1.13356709"
+    "ndk;30.0.15729638"
 )
 
 missing_tools() {

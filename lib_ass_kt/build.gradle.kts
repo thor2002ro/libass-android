@@ -8,7 +8,7 @@ val prebuiltLibassAar = rootProject.layout.projectDirectory.file("OUTPUT/lib_ass
 android {
     namespace = "io.github.peerless2012.ass.kt"
     compileSdk = 36
-    ndkVersion = "28.1.13356709"
+    ndkVersion = "30.0.15729638"
 
     defaultConfig {
         minSdk = 21
