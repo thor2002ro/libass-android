@@ -1,0 +1,264 @@
+diff --git a/libass/ass.c b/libass/ass.c
+index b9ce811..7f46769 100644
+--- a/libass/ass.c
++++ b/libass/ass.c
+@@ -56,6 +56,14 @@ static const char *const ssa_style_format =
+ static const char *const ssa_event_format =
+         "Marked, Start, End, Style, Name, "
+         "MarginL, MarginR, MarginV, Effect, Text";
++static const char *const ass2_style_format =
++        "Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
++        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
++        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
++        "Alignment, MarginL, MarginR, MarginV, MarginB, Encoding, RelativeTo";
++static const char *const ass2_event_format =
++        "Layer, Start, End, Style, Name, "
++        "MarginL, MarginR, MarginV, MarginB, Effect, Text";
+ 
+ #define ASS_STYLES_ALLOC 20
+ 
+@@ -114,6 +122,11 @@ int ass_alloc_style(ASS_Track *track)
+ 
+     sid = track->n_styles++;
+     memset(track->styles + sid, 0, sizeof(ASS_Style));
++
++    // Explicitly flag newer values as unset
++    track->styles[sid].MarginB = INT_MIN;
++    track->styles[sid].RelativeTo = 2;
++
+     return sid;
+ }
+ 
+@@ -244,6 +257,8 @@ static void set_default_style(ASS_Style *style)
+     style->Shadow           = 3;
+     style->Alignment        = 2;
+     style->MarginL = style->MarginR = style->MarginV = 20;
++    style->MarginB = INT_MIN;
++    style->RelativeTo = 2;
+ }
+ 
+ static long long string2timecode(ASS_Library *library, char *p)
+@@ -522,6 +537,7 @@ static int process_event_tail(ASS_Track *track, ASS_Event *event,
+             INTVAL(MarginL)
+             INTVAL(MarginR)
+             INTVAL(MarginV)
++            INTVAL(MarginB)
+             TIMEVAL(Start)
+             TIMEVAL(Duration)
+         PARSE_END
+@@ -653,6 +669,8 @@ static int process_style(ASS_Track *track, char *str)
+         // probably an ancient script version
+         if (track->track_type == TRACK_TYPE_SSA)
+             track->style_format = strdup(ssa_style_format);
++        else if (track->track_type == TRACK_TYPE_ASS2)
++            track->style_format = strdup(ass2_style_format);
+         else
+             track->style_format = strdup(ass_style_format);
+         if (!track->style_format)
+@@ -708,7 +726,8 @@ static int process_style(ASS_Track *track, char *str)
+             FPVAL(Angle)
+             INTVAL(BorderStyle)
+             INTVAL(Alignment)
+-                if (track->track_type == TRACK_TYPE_ASS)
++                if (track->track_type == TRACK_TYPE_ASS ||
++                    track->track_type == TRACK_TYPE_ASS2)
+                     target->Alignment = numpad2align(target->Alignment);
+                 // VSFilter compatibility
+                 else if (target->Alignment == 8)
+@@ -718,7 +737,9 @@ static int process_style(ASS_Track *track, char *str)
+             INTVAL(MarginL)
+             INTVAL(MarginR)
+             INTVAL(MarginV)
++            INTVAL(MarginB)
+             INTVAL(Encoding)
++            INTVAL(RelativeTo)
+             FPVAL(ScaleX)
+             FPVAL(ScaleY)
+             FPVAL(Outline)
+@@ -824,7 +845,7 @@ static void custom_format_line_compatibility(ASS_Track *const track,
+ static int process_styles_line(ASS_Track *track, char *str)
+ {
+     int ret = 0;
+-    if (!strncmp(str, "Format:", 7)) {
++    if (!strncmp(str, "Format:", 7) && track->track_type != TRACK_TYPE_ASS2) {
+         char *p = str + 7;
+         skip_spaces(&p);
+         free(track->style_format);
+@@ -860,6 +881,10 @@ static inline void parse_script_type(ASS_Track *track, const char *str)
+         ver = TRACK_TYPE_ASS;
+         --len; --p;
+     }
++    if (*(p-1) == '+') {
++        ver = TRACK_TYPE_ASS2;
++        --len; --p;
++    }
+ 
+     if (len >= 4 && !strncmp(p-4, "4.00", 4))
+         track->track_type = ver;
+@@ -928,6 +953,8 @@ static void event_format_fallback(ASS_Track *track)
+     track->parser_priv->state = PST_EVENTS;
+     if (track->track_type == TRACK_TYPE_SSA)
+         track->event_format = strdup(ssa_event_format);
++    else if (track->track_type == TRACK_TYPE_ASS2)
++        track->event_format = strdup(ass2_event_format);
+     else
+         track->event_format = strdup(ass_event_format);
+     ass_msg(track->library, MSGL_V,
+@@ -992,7 +1019,7 @@ static bool detect_legacy_conv_subs(ASS_Track *track)
+ 
+ static int process_events_line(ASS_Track *track, char *str)
+ {
+-    if (!strncmp(str, "Format:", 7)) {
++    if (!strncmp(str, "Format:", 7) && track->track_type != TRACK_TYPE_ASS2) {
+         char *p = str + 7;
+         skip_spaces(&p);
+         free(track->event_format);
+@@ -1183,6 +1210,9 @@ static int process_line(ASS_Track *track, char *str)
+     } else if (!ass_strncasecmp(str, "[V4+ Styles]", 12)) {
+         track->parser_priv->state = PST_STYLES;
+         track->track_type = TRACK_TYPE_ASS;
++    } else if (!ass_strncasecmp(str, "[V4++ Styles]", 12)) {
++        track->parser_priv->state = PST_STYLES;
++        track->track_type = TRACK_TYPE_ASS2;
+     } else if (!ass_strncasecmp(str, "[Events]", 8)) {
+         track->parser_priv->state = PST_EVENTS;
+     } else if (!ass_strncasecmp(str, "[Fonts]", 7)) {
+diff --git a/libass/ass.h b/libass/ass.h
+index 2b5bea4..eb8d1e6 100644
+--- a/libass/ass.h
++++ b/libass/ass.h
+@@ -161,7 +161,7 @@ typedef enum {
+      */
+     ASS_OVERRIDE_BIT_FONT_SIZE_FIELDS = 1 << 2,
+     /**
+-     * On dialogue events override: FontName, treat_fontname_as_pattern
++     * On dialogue events override: FontName
+      */
+     ASS_OVERRIDE_BIT_FONT_NAME = 1 << 3,
+     /**
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index 0a5652d..15bc813 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -960,7 +960,6 @@ static ASS_Style *handle_selective_style_overrides(RenderContext *state,
+ 
+     if (requested & ASS_OVERRIDE_BIT_FONT_NAME) {
+         new->FontName = user->FontName;
+-        new->treat_fontname_as_pattern = user->treat_fontname_as_pattern;
+     }
+ 
+     if (requested & ASS_OVERRIDE_BIT_COLORS) {
+@@ -995,9 +994,13 @@ static ASS_Style *handle_selective_style_overrides(RenderContext *state,
+     if (requested & ASS_OVERRIDE_BIT_MARGINS) {
+         new->MarginL = user->MarginL;
+         new->MarginR = user->MarginR;
+-        new->MarginV = user->MarginV;
++        new->MarginT = user->MarginT;
++        new->MarginB = user->MarginB;
+     }
+ 
++    // Never override RelativeTo; there are separate mechanisms for that
++    new->RelativeTo = rstyle->RelativeTo;
++
+     if (!new->FontName)
+         new->FontName = rstyle->FontName;
+ 
+@@ -1091,7 +1094,6 @@ void ass_reset_render_context(RenderContext *state, ASS_Style *style)
+ 
+     state->family.str = style->FontName;
+     state->family.len = strlen(style->FontName);
+-    state->treat_family_as_pattern = style->treat_fontname_as_pattern;
+     state->bold = style->Bold;
+     state->italic = style->Italic;
+     ass_update_font(state);
+@@ -2914,8 +2916,13 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+         (event->MarginL) ? event->MarginL : state->style->MarginL;
+     int MarginR =
+         (event->MarginR) ? event->MarginR : state->style->MarginR;
+-    int MarginV =
+-        (event->MarginV) ? event->MarginV : state->style->MarginV;
++    int MarginT =
++        (event->MarginT) ? event->MarginT : state->style->MarginT;
++    int MarginB =
++        (event->MarginB) ? event->MarginB : state->style->MarginB;
++
++    if (MarginB == INT_MIN)
++        MarginB = MarginT;
+ 
+     // calculate max length of a line
+     double max_text_width =
+@@ -2987,7 +2994,7 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+         if (valign == VALIGN_TOP) {     // toptitle
+             device_y =
+                 y2scr_top(state,
+-                          MarginV) + text_info->lines[0].asc;
++                          MarginT) + text_info->lines[0].asc;
+         } else if (valign == VALIGN_CENTER) {   // midtitle
+             double scr_y =
+                 y2scr(state, render_priv->track->PlayResY / 2.0);
+@@ -3001,7 +3008,7 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+                        "Invalid valign, assuming 0 (subtitle)");
+             scr_bottom =
+                 y2scr_sub(state,
+-                          render_priv->track->PlayResY - MarginV);
++                          render_priv->track->PlayResY - MarginB);
+             scr_top = y2scr_top(state, 0); //xxx not always 0?
+             device_y = scr_bottom + (scr_top - scr_bottom) * line_pos / 100.0;
+             device_y -= text_info->height;
+diff --git a/libass/ass_render.h b/libass/ass_render.h
+index 578de28..f767e03 100644
+--- a/libass/ass_render.h
++++ b/libass/ass_render.h
+@@ -281,7 +281,6 @@ struct render_context {
+     ASS_StringView family;
+     unsigned bold;
+     unsigned italic;
+-    int treat_family_as_pattern;
+     int wrap_style;
+     int font_encoding;
+ 
+diff --git a/libass/ass_types.h b/libass/ass_types.h
+index 8d9c22a..c59ce15 100644
+--- a/libass/ass_types.h
++++ b/libass/ass_types.h
+@@ -125,11 +125,15 @@ typedef struct ass_style {
+     int Alignment; // use `VALIGN_* | HALIGN_*` as value
+     int MarginL;
+     int MarginR;
+-    int MarginV;
++    union {
++        int MarginV;
++        int MarginT;
++    };
++    int MarginB; // Applies only if set to a non-INT_MIN value
+     int Encoding;
+-    int treat_fontname_as_pattern; // does nothing (left in place for ABI-compatibility)
+     double Blur; // sets a default \blur for the event; same values as \blur
+     int Justify; // sets text justification independent of event alignment; use ASS_JUSTIFY_*
++    int RelativeTo; // 0 for dialogue, 1 for typesetting, 2 for auto
+ } ASS_Style;
+ 
+ 
+@@ -147,7 +151,11 @@ typedef struct ass_event {
+     char *Name;
+     int MarginL;
+     int MarginR;
+-    int MarginV;
++    union {
++        int MarginV;
++        int MarginT;
++    };
++    int MarginB;
+     char *Effect;
+     char *Text;
+ 
+@@ -280,7 +288,8 @@ typedef struct ass_track {
+     enum {
+         TRACK_TYPE_UNKNOWN = 0,
+         TRACK_TYPE_ASS,
+-        TRACK_TYPE_SSA
++        TRACK_TYPE_SSA,
++        TRACK_TYPE_ASS2,
+     } track_type;
+ 
+     // Script header fields
