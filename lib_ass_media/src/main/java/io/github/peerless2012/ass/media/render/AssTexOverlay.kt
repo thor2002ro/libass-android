@@ -186,7 +186,7 @@ class AssTexOverlay(private val handler: AssHandler, private val render: AssRend
         super.configure(videoSize)
         renderSize = handler.computeRenderSize(videoSize.width, videoSize.height)
         this.texSize = renderSize
-        executor = AssExecutor(render)
+        executor = AssExecutor(handler::renderFrame, handler.config.performanceStatsCollector)
         render.setFrameSize(renderSize.width, renderSize.height)
         texId = GlUtil.createTexture(renderSize.width, renderSize.height, false)
         fboId = GlUtil.createFboForTexture(texId)

@@ -13,9 +13,11 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import io.github.peerless2012.ass.AssRender
-import io.github.peerless2012.ass.AssTrack
 import io.github.peerless2012.ass.Ass
+import io.github.peerless2012.ass.AssFrame
+import io.github.peerless2012.ass.AssRender
+import io.github.peerless2012.ass.AssTexType
+import io.github.peerless2012.ass.AssTrack
 import io.github.peerless2012.ass.media.parser.AssHeaderParser
 import io.github.peerless2012.ass.media.render.AssOverlayManager
 import io.github.peerless2012.ass.media.type.AssRenderType
@@ -118,6 +120,9 @@ class AssHandler(
 
     private var released = false
 
+    val performanceStats: AssPerformanceStats
+        get() = config.performanceStatsCollector?.snapshot() ?: AssPerformanceStats()
+
     /**
      * Initializes the handler with the provided ExoPlayer instance.
      * @param player The ExoPlayer instance to attach to.
@@ -170,6 +175,7 @@ class AssHandler(
         videoSize = Size.ZERO
         videoTime = -1
         videoFrameIndex = 0
+        config.performanceStatsCollector?.reset()
         if (updatePlayer) renderCallback?.invoke(null)
     }
 
@@ -273,6 +279,19 @@ class AssHandler(
     fun setVideoSize(width: Int, height: Int) {
         Log.i("AssHandler", "setVideoSize: width = $width, height = $height")
         videoSize = Size(width, height)
+    }
+
+    fun resetPerformanceStats() {
+        config.performanceStatsCollector?.reset()
+    }
+
+    internal fun renderFrame(timeMs: Long, type: AssTexType): AssFrame? {
+        val render = render ?: return null
+        val stats = config.performanceStatsCollector ?: return render.renderFrame(timeMs, type)
+        val startedNs = System.nanoTime()
+        val frame = render.renderFrame(timeMs, type)
+        stats.record(System.nanoTime() - startedNs, frame)
+        return frame
     }
 
     /**
