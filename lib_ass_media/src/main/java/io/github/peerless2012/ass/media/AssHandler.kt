@@ -405,20 +405,19 @@ class AssHandler(
             if (videoSize.isValid) {
                 render.setStorageSize(videoSize.width, videoSize.height)
             }
-            if (videoSize.isValid) {
-                val renderSize = computeRenderSize(videoSize.width, videoSize.height)
+            val frameSizeSource =
+                if (
+                    (renderType == AssRenderType.OVERLAY_CANVAS ||
+                        renderType == AssRenderType.OVERLAY_OPEN_GL) &&
+                    surfaceSize.isValid
+                ) {
+                    surfaceSize
+                } else {
+                    videoSize
+                }
+            if (frameSizeSource.isValid) {
+                val renderSize = computeRenderSize(frameSizeSource.width, frameSizeSource.height)
                 render.setFrameSize(renderSize.width, renderSize.height)
-            }
-            if (renderType == AssRenderType.OVERLAY_CANVAS || renderType == AssRenderType.OVERLAY_OPEN_GL) {
-                if (surfaceSize.isValid) {
-                    val renderSize = computeRenderSize(surfaceSize.width, surfaceSize.height)
-                    render.setFrameSize(renderSize.width, renderSize.height)
-                }
-            } else {
-                if (videoSize.isValid) {
-                    val renderSize = computeRenderSize(videoSize.width, videoSize.height)
-                    render.setFrameSize(renderSize.width, renderSize.height)
-                }
             }
             Log.i("AssHandler", "Ass cacheSize: ${config.cacheSize}MB")
             Log.i("AssHandler", "Ass glyphSize: ${config.glyphSize}")
