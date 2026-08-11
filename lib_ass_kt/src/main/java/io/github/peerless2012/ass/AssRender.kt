@@ -10,7 +10,7 @@ import kotlin.concurrent.withLock
  * @Version V1.0
  * @Description
  */
-class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
+class AssRender(nativeAss: Long, private val lock: ReentrantLock) : AutoCloseable {
 
     companion object {
 
@@ -30,7 +30,23 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
         external fun nativeAssRenderSetFrameSize(render: Long, width: Int, height: Int)
 
         @JvmStatic
-        external fun nativeAssRenderFrame(render: Long, track: Long, time: Long, type: Int): AssFrame?
+        external fun nativeAssRenderSetPixelAspect(render: Long, pixelAspect: Double)
+
+        @JvmStatic
+        external fun nativeAssRenderFrame(
+            render: Long,
+            track: Long,
+            time: Long,
+            type: Int,
+        ): AssFrame?
+
+        @JvmStatic
+        external fun nativeAssRenderAtlasFrame(
+            render: Long,
+            track: Long,
+            time: Long,
+            maxAtlasSize: Int,
+        ): AssAtlasFrame?
 
         @JvmStatic
         external fun nativeAssRenderDeinit(render: Long)
@@ -44,47 +60,71 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
 
     private var track: AssTrack? = null
 
-    public fun setTrack(track: AssTrack?) {
+    fun setTrack(track: AssTrack?) {
         lock.withLock {
             this.track = track
         }
     }
 
-    public fun setFontScale(scale: Float) {
+    fun setFontScale(scale: Float) {
         lock.withLock {
             if (released || nativeRender == 0L) return
             nativeAssRenderSetFontScale(nativeRender, scale)
         }
     }
 
-    public fun setCacheLimit(glyphMax: Int, bitmapMaxSize: Int) {
+    fun setCacheLimit(glyphMax: Int, bitmapMaxSize: Int) {
         lock.withLock {
             if (released || nativeRender == 0L) return
             nativeAssRenderSetCacheLimit(nativeRender, glyphMax, bitmapMaxSize)
         }
     }
 
-    public fun setStorageSize(width: Int, height: Int) {
+    fun setStorageSize(width: Int, height: Int) {
         lock.withLock {
             if (released || nativeRender == 0L) return
             nativeAssRenderSetStorageSize(nativeRender, width, height)
         }
     }
 
-    public fun setFrameSize(width: Int, height: Int) {
+    fun setFrameSize(width: Int, height: Int) {
         lock.withLock {
             if (released || nativeRender == 0L) return
             nativeAssRenderSetFrameSize(nativeRender, width, height)
         }
     }
 
-    public fun renderFrame(time: Long, type: AssTexType): AssFrame? {
+    fun setPixelAspect(pixelAspect: Double) {
         lock.withLock {
-            if (released || nativeRender == 0L) return null
-            val t = track ?: return null
-            if (t.released || t.nativeAssTrack == 0L) return null
-            return nativeAssRenderFrame(nativeRender, t.nativeAssTrack, time, type.ordinal)
+            if (released || nativeRender == 0L) return
+            nativeAssRenderSetPixelAspect(nativeRender, pixelAspect)
         }
+    }
+
+    fun renderFrame(time: Long, type: AssTexType): AssFrame? = lock.withLock {
+        if (released || nativeRender == 0L) return null
+        val selectedTrack = track ?: return null
+        if (selectedTrack.released || selectedTrack.nativeAssTrack == 0L) return null
+        nativeAssRenderFrame(nativeRender, selectedTrack.nativeAssTrack, time, type.ordinal)
+    }
+
+    /**
+     * Renders all masks into atlas pages. [time] is in milliseconds.
+     *
+     * Returns `null` when libass reports no change. A position-only frame
+     * contains no page bytes; callers must reuse the textures from the last
+     * content-changing frame.
+     */
+    fun renderAtlasFrame(time: Long, maxAtlasSize: Int): AssAtlasFrame? = lock.withLock {
+        if (released || nativeRender == 0L || maxAtlasSize <= 0) return null
+        val selectedTrack = track ?: return null
+        if (selectedTrack.released || selectedTrack.nativeAssTrack == 0L) return null
+        nativeAssRenderAtlasFrame(
+            nativeRender,
+            selectedTrack.nativeAssTrack,
+            time,
+            maxAtlasSize,
+        )
     }
 
     fun release() {
@@ -97,6 +137,10 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
                 nativeRender = 0
             }
         }
+    }
+
+    override fun close() {
+        release()
     }
 
     protected fun finalize() {

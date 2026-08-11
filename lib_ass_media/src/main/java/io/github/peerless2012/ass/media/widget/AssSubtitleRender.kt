@@ -1,7 +1,6 @@
 package io.github.peerless2012.ass.media.widget
 
 interface AssSubtitleRender {
-
-    fun requestRender(timestampNanos: Long)
-
+    /** Requests a subtitle frame for a Media3 presentation timestamp in microseconds. */
+    fun requestRender(presentationTimeUs: Long)
 }

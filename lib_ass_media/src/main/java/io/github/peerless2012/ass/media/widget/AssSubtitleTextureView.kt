@@ -15,38 +15,39 @@ import android.util.Log
 import android.view.TextureView
 import androidx.annotation.WorkerThread
 import androidx.media3.common.C
-import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
-import io.github.peerless2012.ass.AssTexType
+import io.github.peerless2012.ass.AssRender
 import io.github.peerless2012.ass.media.AssHandler
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import io.github.peerless2012.ass.media.executor.AssAtlasExecutor
+import io.github.peerless2012.ass.media.render.AssAtlasGlRenderer
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * @Author peerless2012
- * @Email peerless2012@126.com
- * @DateTime 12/02/25 9:59 PM
- * @Version V1.0
- * @Description
- */
+/** TextureView renderer using persistent, batched libass alpha atlases. */
 @UnstableApi
-class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.SurfaceTextureListener {
+class AssSubtitleTextureView :
+    TextureView,
+    AssSubtitleRender,
+    TextureView.SurfaceTextureListener {
 
     private val assHandler: AssHandler
+    private var renderThread: AssRenderThread? = null
 
     constructor(context: Context, assHandler: AssHandler) : this(context, null, assHandler)
 
-    constructor(context: Context, attrs: AttributeSet?, assHandler: AssHandler) : this(
-        context,
-        attrs,
-        0,
-        assHandler
-    )
+    constructor(
+        context: Context,
+        attrs: AttributeSet?,
+        assHandler: AssHandler,
+    ) : this(context, attrs, 0, assHandler)
 
-    constructor(context: Context, attrs: AttributeSet?, defStyleAttr: Int, assHandler: AssHandler) :
-            super(context, attrs, defStyleAttr) {
+    constructor(
+        context: Context,
+        attrs: AttributeSet?,
+        defStyleAttr: Int,
+        assHandler: AssHandler,
+    ) : super(context, attrs, defStyleAttr) {
         this.assHandler = assHandler
         isOpaque = false
         surfaceTextureListener = this
@@ -55,22 +56,28 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
     interface Renderer {
         @WorkerThread
         fun onSurfaceCreated()
-        @WorkerThread
+
         fun onSurfaceChanged(width: Int, height: Int)
+
         @WorkerThread
-        fun onDrawFrame(timestampNanos: Long): Boolean
+        fun onDrawFrame(presentationTimeUs: Long): Boolean
+
         @WorkerThread
         fun onSurfaceDestroyed()
     }
 
-    private var renderThread: AssRenderThread? = null
-
-    override fun requestRender(timestampNanos: Long) {
-        renderThread?.requestRender(timestampNanos)
+    override fun requestRender(presentationTimeUs: Long) {
+        renderThread?.requestRender(presentationTimeUs)
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        AssRenderThread(surface, width, height, AssRender(assHandler)).also {
+        renderThread?.release()
+        AssRenderThread(
+            surfaceTexture = surface,
+            initialWidth = width,
+            initialHeight = height,
+            renderer = AtlasSurfaceRenderer(assHandler),
+        ).also {
             renderThread = it
             it.start()
         }
@@ -86,313 +93,227 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
         return true
     }
 
-    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-    }
-
-    companion object {
-
-    }
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
 
     private class AssRenderThread(
         private val surfaceTexture: SurfaceTexture,
-        private var width: Int,
-        private var height: Int,
-        private val render: Renderer
-    ) : HandlerThread("AssTexRenderThread"), Handler.Callback {
-
-        private val TAG = "AssTexRenderThread"
-
-        private val MSG_INIT = 1
-        private val MSG_DRAW = 2
-        private val MSG_SURFACE_SIZE_CHANGED = 3
-        private val MSG_RELEASE = 4
-
+        private val initialWidth: Int,
+        private val initialHeight: Int,
+        private val renderer: Renderer,
+    ) : HandlerThread(THREAD_NAME), Handler.Callback {
         private lateinit var handler: Handler
+        private val released = AtomicBoolean(false)
 
         private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
         private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
         private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
-        private var lastDrawTimestampNanos: Long = 0L
+        private var lastPresentationTimeUs: Long = C.TIME_UNSET
 
         override fun start() {
             super.start()
             handler = Handler(looper, this)
-            handler.sendEmptyMessage(MSG_INIT)
+            handler.obtainMessage(MSG_INIT, Size(initialWidth, initialHeight)).sendToTarget()
         }
 
-        fun requestRender(timestampNanos: Long) {
+        fun requestRender(presentationTimeUs: Long) {
+            if (released.get() || !::handler.isInitialized) return
             handler.removeMessages(MSG_DRAW)
-            handler.obtainMessage(MSG_DRAW, timestampNanos).sendToTarget()
+            handler.obtainMessage(MSG_DRAW, presentationTimeUs).sendToTarget()
         }
 
         fun onSurfaceSizeChanged(width: Int, height: Int) {
-            this.width = width
-            this.height = height
-            handler.sendEmptyMessage(MSG_SURFACE_SIZE_CHANGED)
+            if (released.get() || !::handler.isInitialized) return
+            handler.removeMessages(MSG_SURFACE_SIZE_CHANGED)
+            handler.obtainMessage(MSG_SURFACE_SIZE_CHANGED, Size(width, height)).sendToTarget()
         }
 
         fun release() {
+            if (!released.compareAndSet(false, true) || !::handler.isInitialized) return
+            handler.removeCallbacksAndMessages(null)
             handler.sendEmptyMessage(MSG_RELEASE)
         }
 
-        override fun handleMessage(msg: Message): Boolean {
+        override fun handleMessage(message: Message): Boolean {
             try {
-                when (msg.what) {
-                    MSG_INIT -> initInternal()
-                    MSG_DRAW -> drawInternal(msg.obj as Long)
-                    MSG_SURFACE_SIZE_CHANGED -> sizeChangedInternal(width, height)
+                when (message.what) {
+                    MSG_INIT -> {
+                        val size = message.obj as Size
+                        initInternal(size.width, size.height)
+                    }
+
+                    MSG_DRAW -> drawInternal(message.obj as Long)
+                    MSG_SURFACE_SIZE_CHANGED -> {
+                        val size = message.obj as Size
+                        sizeChangedInternal(size.width, size.height)
+                    }
+
                     MSG_RELEASE -> releaseInternal()
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "GL thread error", e)
+            } catch (error: Exception) {
+                Log.e(TAG, "GL render thread failed", error)
                 releaseInternal()
             }
             return true
         }
 
-        private fun initInternal() {
+        private fun initInternal(width: Int, height: Int) {
             try {
                 eglDisplay = GlUtil.getDefaultEglDisplay()
                 eglContext = GlUtil.createEglContext(eglDisplay)
-                eglSurface = GlUtil.createEglSurface(eglDisplay, surfaceTexture, C.COLOR_TRANSFER_SDR, false)
-                EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-                render.onSurfaceCreated()
-                this.sizeChangedInternal(width, height)
-            } catch (e: GlUtil.GlException) {
-                Log.e(TAG, "Failed to initialize EGL", e)
-                throw IllegalStateException("EGL initialization failed", e)
+                eglSurface = GlUtil.createEglSurface(
+                    eglDisplay,
+                    surfaceTexture,
+                    C.COLOR_TRANSFER_SDR,
+                    false,
+                )
+                check(
+                    EGL14.eglMakeCurrent(
+                        eglDisplay,
+                        eglSurface,
+                        eglSurface,
+                        eglContext,
+                    )
+                ) { "eglMakeCurrent failed" }
+                renderer.onSurfaceCreated()
+                sizeChangedInternal(width, height)
+            } catch (error: GlUtil.GlException) {
+                throw IllegalStateException("EGL initialization failed", error)
             }
         }
 
         private fun sizeChangedInternal(width: Int, height: Int) {
-            render.onSurfaceChanged(width, height)
-            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                GlUtil.clearFocusedBuffers()
-                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
-            }
-            if (lastDrawTimestampNanos != 0L) {
-                drawInternal(lastDrawTimestampNanos)
+            if (eglDisplay == EGL14.EGL_NO_DISPLAY) return
+            renderer.onSurfaceChanged(width, height)
+            GlUtil.clearFocusedBuffers()
+            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            if (lastPresentationTimeUs != C.TIME_UNSET) {
+                drawInternal(lastPresentationTimeUs)
             }
         }
 
-        private fun drawInternal(timestampNanos: Long) {
-            lastDrawTimestampNanos = timestampNanos
+        private fun drawInternal(presentationTimeUs: Long) {
+            lastPresentationTimeUs = presentationTimeUs
             if (eglDisplay == EGL14.EGL_NO_DISPLAY) return
-            if (render.onDrawFrame(timestampNanos)) {
+            if (renderer.onDrawFrame(presentationTimeUs)) {
                 EGL14.eglSwapBuffers(eglDisplay, eglSurface)
             }
         }
 
         private fun releaseInternal() {
-            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                try {
-                    render.onSurfaceDestroyed()
-                    GlUtil.destroyEglSurface(eglDisplay, eglSurface)
-                    GlUtil.destroyEglContext(eglDisplay, eglContext)
-                } catch (e: GlUtil.GlException) {
-                    Log.e(TAG, "Failed to release EGL resources", e)
-                } finally {
-                    eglDisplay = EGL14.EGL_NO_DISPLAY
-                    eglContext = EGL14.EGL_NO_CONTEXT
-                    eglSurface = EGL14.EGL_NO_SURFACE
+            try {
+                if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                    renderer.onSurfaceDestroyed()
+                    EGL14.eglMakeCurrent(
+                        eglDisplay,
+                        EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_CONTEXT,
+                    )
+                    if (eglSurface != EGL14.EGL_NO_SURFACE) {
+                        GlUtil.destroyEglSurface(eglDisplay, eglSurface)
+                    }
+                    if (eglContext != EGL14.EGL_NO_CONTEXT) {
+                        GlUtil.destroyEglContext(eglDisplay, eglContext)
+                    }
                 }
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to release EGL resources", error)
+            } finally {
+                eglDisplay = EGL14.EGL_NO_DISPLAY
+                eglContext = EGL14.EGL_NO_CONTEXT
+                eglSurface = EGL14.EGL_NO_SURFACE
+                quitSafely()
             }
-            quit()
+        }
+
+        private companion object {
+            const val TAG = "AssTexRenderThread"
+            const val THREAD_NAME = "AssTexRenderThread"
+            const val MSG_INIT = 1
+            const val MSG_DRAW = 2
+            const val MSG_SURFACE_SIZE_CHANGED = 3
+            const val MSG_RELEASE = 4
         }
     }
 
-    private class AssRender(private val assHandler: AssHandler) : Renderer {
-
-        private val TAG = "AssRender"
-
-        private val vertexShaderCode = """
-            attribute vec4 a_Position;
-            attribute vec2 a_TexCoord;
-            varying vec2 v_TexCoord;
-            void main() {
-                gl_Position = a_Position;
-                v_TexCoord = a_TexCoord.xy;
-            }
-        """.trimIndent()
-
-        // alpha
-        private val fragmentShaderCode = """
-            precision mediump float;
-            varying vec2 v_TexCoord;
-            uniform sampler2D u_Texture;
-            uniform vec4 u_Color;
-            void main() {
-                float alpha = texture2D(u_Texture, v_TexCoord).a;
-                gl_FragColor = vec4(u_Color.rgb, u_Color.a * alpha);
-            }
-        """.trimIndent()
-
-        private val rectangleCoords = floatArrayOf(
-            -1f,  1f,  // Top left
-            1f,  1f,  // Top right
-            -1f, -1f,  // Bottom left
-            1f, -1f   // Bottom right
-        )
-
-        private val textureCoords = floatArrayOf(
-            0f, 0f,  // Top left
-            1f, 0f,  // Top right
-            0f, 1f,  // Bottom left
-            1f, 1f   // Bottom right
-        )
-
-        private var surfaceDirty = true
-
-        private var forceNextRender = false
-
+    private class AtlasSurfaceRenderer(
+        private val assHandler: AssHandler,
+    ) : Renderer {
         private var surfaceSize = Size.ZERO
-
         private var renderSize = Size.ZERO
+        private var maxAtlasSize = 2_048
+        private var forceNextRender = true
 
-        private lateinit var glProgram: GlProgram
-
-        private var vertexBufferId = 0
-
-        private var texCoordBufferId = 0
-
-        // Whether GL_EXT_unpack_subimage is supported.
-        // When supported, native createTexture can use GL_UNPACK_ROW_LENGTH_EXT directly.
-        // Otherwise, fallback to bitmap upload on the Kotlin side.
-        private var useNativeTexture = false
+        private var atlasRenderer: AssAtlasGlRenderer? = null
+        private var executor: AssAtlasExecutor? = null
+        private var executorRender: AssRender? = null
 
         override fun onSurfaceCreated() {
-            // Detect GL_EXT_unpack_subimage support.
-            // Native createTexture relies on this extension for stride-aware texture upload.
-            // On GPUs that don't support it (e.g. Mali-470), fallback to bitmap mode.
-            val extensions = GLES20.glGetString(GLES20.GL_EXTENSIONS) ?: ""
-            useNativeTexture = "GL_EXT_unpack_subimage" in extensions
-            if (!useNativeTexture) {
-                Log.w(TAG, "GL_EXT_unpack_subimage not supported, fallback to bitmap texture upload")
+            val deviceLimit = IntArray(1).also {
+                GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, it, 0)
+            }[0].takeIf { it > 0 } ?: 2_048
+            val configuredLimit = assHandler.config.maxAtlasTextureSize
+            maxAtlasSize = if (configuredLimit > 0) {
+                minOf(deviceLimit, configuredLimit).coerceAtLeast(1)
+            } else {
+                deviceLimit
             }
-
-            glProgram = GlProgram(vertexShaderCode, fragmentShaderCode)
-            GlUtil.checkGlError()
-
-            val vertexBuffer = ByteBuffer.allocateDirect(rectangleCoords.size * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer()
-                .put(rectangleCoords)
-            vertexBuffer.position(0)
-
-            val texCordBuffer = ByteBuffer.allocateDirect(textureCoords.size * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer()
-                .put(textureCoords)
-            texCordBuffer.position(0)
-
-            val buffers = IntArray(2)
-            GLES20.glGenBuffers(2, buffers, 0)
-            vertexBufferId = buffers[0]
-            texCoordBufferId = buffers[1]
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vertexBufferId)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, rectangleCoords.size * 4, vertexBuffer, GLES20.GL_STATIC_DRAW)
-            GlUtil.checkGlError()
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, texCoordBufferId)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, textureCoords.size * 4, texCordBuffer, GLES20.GL_STATIC_DRAW)
-            GlUtil.checkGlError()
-            // ALPHA_8 need set pixel store to 1
-            // Or the render result may error or crash
-            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-
-            // enable blend
-            GLES20.glEnable(GLES20.GL_BLEND)
-            // set blend mode
-            GLES20.glBlendFuncSeparate(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            atlasRenderer = AssAtlasGlRenderer().also { it.initialize() }
+            forceNextRender = true
         }
 
         override fun onSurfaceChanged(width: Int, height: Int) {
             surfaceSize = Size(width, height)
-            renderSize = assHandler.computeRenderSize(width, height)
+            renderSize = assHandler.computeRenderSize(width, height).let { size ->
+                if (size.width > 0 && size.height > 0) size else Size(2, 2)
+            }
             assHandler.render?.setFrameSize(renderSize.width, renderSize.height)
-            GLES20.glViewport(0, 0, width, height)
+
+            // A frame-size change invalidates both packed masks and deferred work.
+            replaceExecutor(assHandler.render)
+            atlasRenderer?.clearCachedContent()
             forceNextRender = true
         }
 
-        override fun onDrawFrame(timestampNanos: Long): Boolean {
-            val texType = if (useNativeTexture) AssTexType.TEXTURE else AssTexType.BITMAP_ALPHA
-            val assFrame = assHandler.renderFrame(timestampNanos / 1000, texType)
+        override fun onDrawFrame(presentationTimeUs: Long): Boolean {
+            val activeRender = assHandler.render
+            if (activeRender !== executorRender) {
+                replaceExecutor(activeRender)
+                atlasRenderer?.clearCachedContent()
+                activeRender?.setFrameSize(renderSize.width, renderSize.height)
+                forceNextRender = true
+            }
 
-            // if content not change, just return the tex
             val force = forceNextRender
             forceNextRender = false
-            if (assFrame != null && assFrame.changed == 0 && !force) {
-                return false
-            }
-
-            // no content && tex is clean, just return the tex
-            if (assFrame == null && !surfaceDirty) {
-                return false
-            }
-
-            // clear surface content
-            GlUtil.clearFocusedBuffers()
-            surfaceDirty = false
-
-            // render each frame
-            assFrame?.images?.let { frames ->
-                surfaceDirty = true
-                glProgram.use()
-                val aPosition = glProgram.getAttributeArrayLocationAndEnable("a_Position")
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vertexBufferId)
-                GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 0, 0)
-                GlUtil.checkGlError()
-                val aTexCoord = glProgram.getAttributeArrayLocationAndEnable("a_TexCoord")
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, texCoordBufferId)
-                GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, 0)
-                GlUtil.checkGlError()
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-
-                frames.forEach { frame ->
-                    // Resolve texture id based on the render mode
-                    val texId = if (useNativeTexture) {
-                        frame.tex
-                    } else {
-                        frame.bitmap?.let { GlUtil.createTexture(it) } ?: 0
-                    }
-
-                    if (texId > 0) {
-                        val r = frame.color shr 24 and 0xFF
-                        val g = frame.color shr 16 and 0xFF
-                        val b = frame.color shr 8 and 0xFF
-                        val a = 0xFF - frame.color and 0xFF
-
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-                        GlUtil.checkGlError()
-
-                        // Scale coordinates from render size to surface size
-                        val scaleX = surfaceSize.width.toFloat() / renderSize.width
-                        val scaleY = surfaceSize.height.toFloat() / renderSize.height
-                        val scaledX = (frame.x * scaleX).toInt()
-                        val scaledY = (frame.y * scaleY).toInt()
-                        val scaledW = (frame.w * scaleX).toInt()
-                        val scaledH = (frame.h * scaleY).toInt()
-                        GLES20.glViewport(scaledX, surfaceSize.height - scaledY - scaledH, scaledW, scaledH)
-                        GLES20.glUniform4f(glProgram.getUniformLocation("u_Color"), r / 255f, g / 255f, b / 255f, a / 255f)
-
-                        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-                        GlUtil.checkGlError()
-
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
-                        GlUtil.deleteTexture(texId)
-                    }
-                }
-            }
-            GLES20.glViewport(0, 0, surfaceSize.width, surfaceSize.height)
-            return true
+            val frame = executor?.renderFrame(presentationTimeUs)
+            val result = atlasRenderer?.render(
+                frame = frame,
+                sourceWidth = renderSize.width,
+                sourceHeight = renderSize.height,
+                targetWidth = surfaceSize.width,
+                targetHeight = surfaceSize.height,
+                forceRedraw = force,
+            ) ?: AssAtlasGlRenderer.DrawResult.UNCHANGED
+            return result != AssAtlasGlRenderer.DrawResult.UNCHANGED
         }
 
         override fun onSurfaceDestroyed() {
-            GlUtil.deleteBuffer(vertexBufferId)
-            GlUtil.deleteBuffer(texCoordBufferId)
-            if (::glProgram.isInitialized) {
-                glProgram.delete()
+            executor?.shutdown()
+            executor = null
+            executorRender = null
+            atlasRenderer?.release()
+            atlasRenderer = null
+        }
+
+        private fun replaceExecutor(render: AssRender?) {
+            executor?.shutdown()
+            executor = render?.let {
+                AssAtlasExecutor(
+                    frameRenderer = { timeMs -> assHandler.renderAtlasFrame(timeMs, maxAtlasSize) },
+                )
             }
+            executorRender = render
         }
 
     }

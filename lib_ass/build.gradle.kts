@@ -1,9 +1,5 @@
-import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
-
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.maven.publish)
 }
 
 android {
@@ -48,10 +44,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    kotlinOptions {
-        jvmTarget = "11"
-    }
-
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -70,11 +62,4 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-}
-
-mavenPublishing {
-    publishToMavenCentral()
-    // https://vanniktech.github.io/gradle-maven-publish-plugin/what/
-    configure(AndroidSingleVariantLibrary())
-    signAllPublications()
 }
