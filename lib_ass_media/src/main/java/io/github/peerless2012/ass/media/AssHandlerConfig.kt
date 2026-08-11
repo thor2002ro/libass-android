@@ -1,6 +1,6 @@
 package io.github.peerless2012.ass.media
 
-data class AssHandlerConfig(
+data class AssHandlerConfig @JvmOverloads constructor(
     val glyphSize: Int = 10_000,
     val cacheSize: Int = 128,
 
@@ -31,4 +31,19 @@ data class AssHandlerConfig(
      * upload size at the cost of additional atlas pages and draw calls.
      */
     val maxAtlasTextureSize: Int = 0,
-)
+
+    /**
+     * Maximum cumulative embedded font bytes accepted for one media item.
+     *
+     * A single font larger than this is rejected too.
+     */
+    val maxEmbeddedFontBytes: Long = DEFAULT_MAX_EMBEDDED_FONT_BYTES,
+) {
+    init {
+        require(maxEmbeddedFontBytes >= 0) { "maxEmbeddedFontBytes must not be negative" }
+    }
+
+    companion object {
+        const val DEFAULT_MAX_EMBEDDED_FONT_BYTES = 32L * 1024 * 1024
+    }
+}
