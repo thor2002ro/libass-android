@@ -311,6 +311,7 @@ class AssSubtitleTextureView :
             executor = render?.let {
                 AssAtlasExecutor(
                     frameRenderer = { timeMs -> assHandler.renderAtlasFrame(timeMs, maxAtlasSize) },
+                    statsCollector = assHandler.config.performanceStatsCollector,
                 )
             }
             executorRender = render
