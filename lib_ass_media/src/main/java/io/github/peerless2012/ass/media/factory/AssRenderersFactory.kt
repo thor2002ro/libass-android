@@ -19,7 +19,20 @@ import io.github.peerless2012.ass.media.render.AssRenderer
  * @Description
  */
 @UnstableApi
-class AssRenderersFactory(private val assHandler: AssHandler, private val renderersFactory: RenderersFactory): RenderersFactory {
+class AssRenderersFactory(
+    private val assHandler: AssHandler,
+    private val renderersFactory: RenderersFactory
+): RenderersFactory {
+    private var releaseAssHandler = false
+
+    internal constructor(
+        assHandler: AssHandler,
+        renderersFactory: RenderersFactory,
+        releaseAssHandler: Boolean
+    ) : this(assHandler, renderersFactory) {
+        this.releaseAssHandler = releaseAssHandler
+    }
+
     override fun createRenderers(
         eventHandler: Handler,
         videoRendererEventListener: VideoRendererEventListener,
@@ -28,7 +41,7 @@ class AssRenderersFactory(private val assHandler: AssHandler, private val render
         metadataRendererOutput: MetadataOutput
     ): Array<Renderer> {
         val renderers = renderersFactory.createRenderers(eventHandler, videoRendererEventListener, audioRendererEventListener, textRendererOutput, metadataRendererOutput)
-        return (renderers.toMutableList() + AssRenderer(assHandler)).toTypedArray()
+        return (renderers.toMutableList() + AssRenderer(assHandler, releaseAssHandler)).toTypedArray()
     }
 
     override fun createSecondaryRenderer(
