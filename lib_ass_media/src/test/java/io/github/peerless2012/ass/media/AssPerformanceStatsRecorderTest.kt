@@ -86,6 +86,19 @@ class AssPerformanceStatsRecorderTest {
     }
 
     @Test
+    fun recordsEmptyChangedBitmapFrame() {
+        val collector = AssPerformanceStatsCollector()
+
+        collector.record(1_000_000, AssFrame(null, 1))
+
+        val stats = collector.snapshot()
+        assertEquals(1L, stats.renderCount)
+        assertEquals(1L, stats.changedRenderCount)
+        assertEquals(1L, stats.emptyRenderCount)
+        assertEquals(0L, stats.imageCount)
+    }
+
+    @Test
     fun ignoresNonPositiveImageAreas() {
         val collector = AssPerformanceStatsCollector()
 

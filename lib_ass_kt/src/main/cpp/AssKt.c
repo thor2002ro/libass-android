@@ -516,7 +516,11 @@ static jobject nativeAssRenderFrame(
         &changed
     );
 
-    if (images == NULL) return NULL;
+    if (images == NULL) {
+        if (changed == 0) return NULL;
+        // Preserve empty changed frames so bitmap renderers clear stale subtitles.
+        return (*env)->NewObject(env, g_ass_frame_class, g_ass_frame_ctor, NULL, changed);
+    }
     if (changed == 0) {
         return (*env)->NewObject(env, g_ass_frame_class, g_ass_frame_ctor, NULL, changed);
     }
