@@ -8,6 +8,9 @@ import androidx.media3.common.util.Util
 import androidx.media3.extractor.TrackOutput
 import io.github.peerless2012.ass.media.AssHandler
 import io.github.peerless2012.ass.media.extractor.AssMatroskaExtractor
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.util.zip.InflaterInputStream
 import java.util.regex.Pattern
 
 /**
@@ -41,19 +44,30 @@ class AssTrackOutput(
     ) {
         if (isAss && timeUs.isValidTs) {
             val sample = extractor.subtitleSample
-            val endIndex = findTokenIndex(sample.data, 1)
-            val lineIndex = findTokenIndex(sample.data, 2)
+            val sampleLimit = sample.limit()
+            val endIndex = findTokenIndex(sample.data, sampleLimit, 1)
+            val lineIndex = findTokenIndex(sample.data, sampleLimit, 2)
+            if (endIndex == 0 || lineIndex == 0) {
+                delegate.sampleMetadata(timeUs, flags, size, offset, cryptoData)
+                return
+            }
 
             val rawDuration = sample.data.decodeToString(endIndex, lineIndex - 1)
             val durationUs = parseTimecodeUs(rawDuration)
+            val payloadLength = sampleLimit - lineIndex
+            // Media3 truncates subtitleSample.limit() at NUL bytes, which can appear inside zlib data.
+            val inflatedPayload = sample.data.inflateZlib(lineIndex, sample.data.size - lineIndex)
+            val data = inflatedPayload ?: sample.data
+            val dataOffset = if (inflatedPayload == null) lineIndex else 0
+            val dataLength = inflatedPayload?.size ?: payloadLength
 
             assHandler.readTrackDialogue(
                 trackId = trackId,
                 start = timeUs / 1000,
                 duration = durationUs / 1000,
-                data = sample.data,
-                offset = lineIndex,
-                length = sample.limit() - lineIndex
+                data = data,
+                offset = dataOffset,
+                length = dataLength
             )
         }
         delegate.sampleMetadata(timeUs, flags, size, offset, cryptoData)
@@ -72,11 +86,11 @@ class AssTrackOutput(
         return timestampUs
     }
 
-    private fun findTokenIndex(array: ByteArray, tokenNumber: Int): Int {
+    private fun findTokenIndex(array: ByteArray, limit: Int, tokenNumber: Int): Int {
         if (tokenNumber == 0) return 0
         var tokensFound = 0
-        array.forEachIndexed { index, byte ->
-            if (byte == COMMA && ++tokensFound == tokenNumber) {
+        for (index in 0 until limit) {
+            if (array[index] == COMMA && ++tokensFound == tokenNumber) {
                 return index + 1
             }
         }
@@ -91,5 +105,25 @@ class AssTrackOutput(
             Pattern.compile("""(?:(\d+):)?(\d+):(\d+)[:.](\d+)""")
 
         const val COMMA = ','.code.toByte()
+
+        private fun ByteArray.inflateZlib(offset: Int, length: Int): ByteArray? {
+            if (!hasZlibHeader(offset, length)) return null
+
+            return runCatching {
+                InflaterInputStream(ByteArrayInputStream(this, offset, length)).use { input ->
+                    val output = ByteArrayOutputStream()
+                    input.copyTo(output)
+                    output.toByteArray()
+                }
+            }.getOrNull()
+        }
+
+        private fun ByteArray.hasZlibHeader(offset: Int, length: Int): Boolean {
+            if (length < 2 || offset < 0 || offset + 1 >= size) return false
+
+            val cmf = this[offset].toInt() and 0xFF
+            val flg = this[offset + 1].toInt() and 0xFF
+            return (cmf and 0x0F) == 8 && (((cmf shl 8) + flg) % 31) == 0
+        }
     }
 }
