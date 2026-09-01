@@ -1,6 +1,1 @@
--keep class io.github.peerless2012.ass.Ass { *; }
--keep class io.github.peerless2012.ass.AssEvent { *; }
--keep class io.github.peerless2012.ass.AssFrame { *; }
--keep class io.github.peerless2012.ass.AssRender { *; }
--keep class io.github.peerless2012.ass.AssTex { *; }
--keep class io.github.peerless2012.ass.AssTrack { *; }
+-keep class io.github.peerless2012.ass.** { *; }
