@@ -2,6 +2,11 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+android_ndk_version="$(sed -n 's/^androidNdkVersion=//p' "$repo/gradle.properties" | head -n 1)"
+[[ -n "$android_ndk_version" ]] || {
+    echo "androidNdkVersion is missing from $repo/gradle.properties"
+    exit 1
+}
 
 required_tools=(java git autoreconf autoconf automake libtoolize autopoint gperf make curl unzip pkg-config perl)
 android_sdk_packages=(
@@ -9,7 +14,7 @@ android_sdk_packages=(
     "platforms;android-36"
     "build-tools;36.0.0"
     "cmake;3.22.1"
-    "ndk;28.1.13356709"
+    "ndk;$android_ndk_version"
 )
 
 missing_tools() {

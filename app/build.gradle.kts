@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "io.github.peerless2012.ass.demo"
     compileSdk = 35
+    ndkVersion = providers.gradleProperty("androidNdkVersion").get()
 
     defaultConfig {
         applicationId = "io.github.peerless2012.ass"

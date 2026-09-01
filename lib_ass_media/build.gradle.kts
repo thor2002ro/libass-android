@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "io.github.peerless2012.exo"
     compileSdk = 36
+    ndkVersion = providers.gradleProperty("androidNdkVersion").get()
 
     defaultConfig {
         minSdk = 21
