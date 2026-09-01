@@ -3,6 +3,7 @@ package io.github.peerless2012.ass.media
 import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.AssFrame
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 
 data class AssPerformanceStats(
     /** Frames that reached the measured libass render path. */
@@ -67,6 +68,9 @@ data class AssPerformanceStats(
 
     /** Most recent measured render duration. */
     val lastRenderMs: Double = 0.0,
+
+    /** OpenGL path actually used by the subtitle renderer. */
+    val openGlMode: String? = null,
 ) {
     /** Single-line summary for app-owned debug UI or manual logging. */
     fun toSummaryString(): String = String.format(
@@ -100,11 +104,17 @@ class AssPerformanceStatsCollector(
     val slowRenderThresholdMs: Double = 16.67
 ) {
     private val recorder = AssPerformanceStatsRecorder(slowRenderThresholdMs = slowRenderThresholdMs)
+    private val openGlMode = AtomicReference<String?>(null)
 
-    fun snapshot(): AssPerformanceStats = recorder.snapshot()
+    fun snapshot(): AssPerformanceStats = recorder.snapshot().copy(openGlMode = openGlMode.get())
 
     fun reset() {
         recorder.reset()
+        openGlMode.set(null)
+    }
+
+    fun recordOpenGlMode(mode: String) {
+        openGlMode.set(mode)
     }
 
     internal fun record(renderDurationNs: Long, frame: AssFrame?) {

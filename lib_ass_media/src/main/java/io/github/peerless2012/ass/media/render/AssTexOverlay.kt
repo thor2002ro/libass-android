@@ -119,7 +119,9 @@ class AssTexOverlay(
             premultipliedTextureId = GlUtil.createTexture(renderSize.width, renderSize.height, false)
             premultipliedFboId = GlUtil.createFboForTexture(premultipliedTextureId)
 
-            atlasRenderer = AssAtlasGlRenderer().also { it.initialize() }
+            atlasRenderer = AssAtlasGlRenderer(handler.config.performanceStatsCollector).also {
+                it.initialize()
+            }
             executor = AssAtlasExecutor(
                 frameRenderer = { timeMs -> handler.renderAtlasFrame(timeMs, maxAtlasSize) },
                 statsCollector = handler.config.performanceStatsCollector,

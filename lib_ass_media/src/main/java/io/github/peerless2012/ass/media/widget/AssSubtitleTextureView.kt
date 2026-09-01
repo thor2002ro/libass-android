@@ -258,7 +258,9 @@ class AssSubtitleTextureView :
             } else {
                 deviceLimit
             }
-            atlasRenderer = AssAtlasGlRenderer().also { it.initialize() }
+            atlasRenderer = AssAtlasGlRenderer(assHandler.config.performanceStatsCollector).also {
+                it.initialize()
+            }
             forceNextRender = true
         }
 

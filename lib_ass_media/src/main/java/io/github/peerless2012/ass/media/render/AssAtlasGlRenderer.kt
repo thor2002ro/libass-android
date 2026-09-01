@@ -8,13 +8,15 @@ import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.UnstableApi
 import io.github.peerless2012.ass.AssAtlasFrame
+import io.github.peerless2012.ass.media.AssPerformanceStatsCollector
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 
 /** Draws libass alpha-atlas pages into the currently bound framebuffer. */
 @OptIn(UnstableApi::class)
-internal class AssAtlasGlRenderer {
+internal class AssAtlasGlRenderer(
+    private val statsCollector: AssPerformanceStatsCollector? = null,
+) {
     enum class DrawResult {
         UNCHANGED,
         REDRAWN_EMPTY,
@@ -28,11 +30,15 @@ internal class AssAtlasGlRenderer {
 
     private var program: GlProgram? = null
     private var vertexBufferId = 0
-    private var gpuBufferCapacityBytes = 0
-    private var floatBuffer: FloatBuffer? = null
-    private var floatBufferCapacity = 0
+    private var indexBufferId = 0
+    private var gpuVertexCapacityBytes = 0
+    private var gpuIndexCapacityBytes = 0
     private var uploadBuffer: ByteBuffer? = null
     private var uploadBufferCapacity = 0
+    private var pboIds = IntArray(0)
+    private var pboCapacities = IntArray(0)
+    private var nextPbo = 0
+    private var pboEnabled = false
 
     private var positionLocation = -1
     private var texCoordLocation = -1
@@ -41,11 +47,14 @@ internal class AssAtlasGlRenderer {
     private var initialized = false
     private var hasContent = false
     private var isGles3 = false
+    private var uploadedContentSerial = 0L
+    private var currentMode: String? = null
 
     fun initialize() {
         if (initialized) return
         val version = GLES20.glGetString(GLES20.GL_VERSION).orEmpty()
         isGles3 = version.contains("OpenGL ES 3")
+        reportMode(if (isGles3) MODE_GLES3_DIRECT else MODE_GLES2)
 
         val fragmentShader = if (isGles3) {
             FRAGMENT_SHADER_RED
@@ -63,16 +72,24 @@ internal class AssAtlasGlRenderer {
                 GLES20.glDisableVertexAttribArray(texCoordLocation)
                 GLES20.glDisableVertexAttribArray(colorLocation)
             }
-            val buffers = IntArray(1)
-            GLES20.glGenBuffers(1, buffers, 0)
+            val buffers = IntArray(2)
+            GLES20.glGenBuffers(2, buffers, 0)
             vertexBufferId = buffers[0]
-            check(vertexBufferId != 0) { "Unable to create subtitle vertex buffer" }
+            indexBufferId = buffers[1]
+            check(vertexBufferId != 0 && indexBufferId != 0) {
+                "Unable to create subtitle geometry buffers"
+            }
             GlUtil.checkGlError()
+            if (isGles3) initializePbos()
             initialized = true
         } catch (error: Exception) {
             if (vertexBufferId != 0) {
                 GlUtil.deleteBuffer(vertexBufferId)
                 vertexBufferId = 0
+            }
+            if (indexBufferId != 0) {
+                GlUtil.deleteBuffer(indexBufferId)
+                indexBufferId = 0
             }
             program?.delete()
             program = null
@@ -89,6 +106,7 @@ internal class AssAtlasGlRenderer {
         forceRedraw: Boolean = false,
     ): DrawResult {
         check(initialized) { "AssAtlasGlRenderer.initialize() must be called first" }
+        currentMode?.let { statsCollector?.recordOpenGlMode(it) }
         if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
             return DrawResult.UNCHANGED
         }
@@ -112,7 +130,9 @@ internal class AssAtlasGlRenderer {
                     // An empty position-only frame means the subtitle moved fully
                     // out of view. It can clear the target while keeping the old
                     // atlas available for a later position-only frame.
-                    if (frame.quads.isNotEmpty() && !pageLayoutMatches(frame)) {
+                    if (frame.quads.isNotEmpty() &&
+                        (!pageLayoutMatches(frame) || frame.contentSerial != uploadedContentSerial)
+                    ) {
                         Log.w(TAG, "Ignoring position-only frame with a changed atlas layout")
                         return DrawResult.UNCHANGED
                     }
@@ -166,11 +186,12 @@ internal class AssAtlasGlRenderer {
         GLES20.glVertexAttribPointer(
             colorLocation,
             4,
-            GLES20.GL_FLOAT,
-            false,
+            GLES20.GL_UNSIGNED_BYTE,
+            true,
             AssAtlasVertexBuffer.VERTEX_STRIDE_BYTES,
             AssAtlasVertexBuffer.COLOR_OFFSET_BYTES,
         )
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, indexBufferId)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glUniform1i(textureLocation, 0)
@@ -178,14 +199,16 @@ internal class AssAtlasGlRenderer {
             val page = geometry.runPages[run]
             if (page !in textureIds.indices) return@repeat
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureIds[page])
-            GLES20.glDrawArrays(
+            GLES20.glDrawElements(
                 GLES20.GL_TRIANGLES,
-                geometry.runFirstVertices[run],
-                geometry.runVertexCounts[run],
+                geometry.runIndexCounts[run],
+                GLES20.GL_UNSIGNED_SHORT,
+                geometry.runFirstIndices[run] * AssAtlasVertexBuffer.BYTES_PER_INDEX,
             )
         }
 
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GLES20.glDisableVertexAttribArray(positionLocation)
         GLES20.glDisableVertexAttribArray(texCoordLocation)
@@ -203,17 +226,21 @@ internal class AssAtlasGlRenderer {
     fun release() {
         if (!initialized) return
         deleteTextures()
+        deletePbos()
         if (vertexBufferId != 0) {
             GlUtil.deleteBuffer(vertexBufferId)
             vertexBufferId = 0
+        }
+        if (indexBufferId != 0) {
+            GlUtil.deleteBuffer(indexBufferId)
+            indexBufferId = 0
         }
         program?.delete()
         program = null
         geometry.clear()
         hasContent = false
-        gpuBufferCapacityBytes = 0
-        floatBuffer = null
-        floatBufferCapacity = 0
+        gpuVertexCapacityBytes = 0
+        gpuIndexCapacityBytes = 0
         uploadBuffer = null
         uploadBufferCapacity = 0
         positionLocation = -1
@@ -233,6 +260,7 @@ internal class AssAtlasGlRenderer {
             deleteTextures()
             textureWidths = IntArray(0)
             textureHeights = IntArray(0)
+            uploadedContentSerial = frame.contentSerial
             return frame.quads.isEmpty()
         }
 
@@ -244,7 +272,7 @@ internal class AssAtlasGlRenderer {
             val height = frame.pageHeights[index]
             val expectedBytes = width.toLong() * height
             if (width <= 0 || height <= 0 || expectedBytes > Int.MAX_VALUE ||
-                pages[index].size != expectedBytes.toInt()
+                pages[index].capacity() < expectedBytes.toInt()
             ) {
                 return false
             }
@@ -254,6 +282,8 @@ internal class AssAtlasGlRenderer {
 
         val newWidths = frame.pageWidths.copyOf()
         val newHeights = frame.pageHeights.copyOf()
+        val dirtySequenceValid = uploadedContentSerial != 0L &&
+            frame.contentSerial == uploadedContentSerial + 1L
         for (index in pages.indices) {
             val width = newWidths[index]
             val height = newHeights[index]
@@ -268,22 +298,22 @@ internal class AssAtlasGlRenderer {
                 texture = replacement
                 textureIds[index] = texture
             } else {
-                val buffer = prepareUploadBuffer(bytes)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-                GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
                 if (isGles3) {
-                    GLES30.glTexSubImage2D(
-                        GLES20.GL_TEXTURE_2D,
-                        0,
-                        0,
-                        0,
-                        width,
-                        height,
-                        GLES30.GL_RED,
-                        GLES20.GL_UNSIGNED_BYTE,
-                        buffer,
-                    )
+                    val dirty = if (dirtySequenceValid) {
+                        dirtyRect(frame, index, width, height) ?: return false
+                    } else {
+                        DirtyRect(0, 0, width, height)
+                    }
+                    if (dirty.width > 0 && dirty.height > 0) {
+                        val buffer = prepareRegionBuffer(bytes, width, dirty)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+                        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+                        uploadGles3Region(dirty, buffer)
+                    }
                 } else {
+                    val buffer = bytes.duplicate().apply { clear(); limit(width * height) }
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+                    GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
                     GLES20.glTexSubImage2D(
                         GLES20.GL_TEXTURE_2D,
                         0,
@@ -307,18 +337,19 @@ internal class AssAtlasGlRenderer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
         textureWidths = newWidths
         textureHeights = newHeights
+        uploadedContentSerial = frame.contentSerial
         GlUtil.checkGlError()
         return true
     }
 
-    private fun createAlphaTexture(width: Int, height: Int, bytes: ByteArray): Int {
+    private fun createAlphaTexture(width: Int, height: Int, bytes: ByteBuffer): Int {
         val ids = IntArray(1)
         GLES20.glGenTextures(1, ids, 0)
         val texture = ids[0]
         if (texture == 0) return 0
 
         try {
-            val buffer = prepareUploadBuffer(bytes)
+            val buffer = bytes.duplicate().apply { clear(); limit(width * height) }
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
             GLES20.glTexParameteri(
                 GLES20.GL_TEXTURE_2D,
@@ -379,50 +410,173 @@ internal class AssAtlasGlRenderer {
             frame.pageHeights.contentEquals(textureHeights)
 
     private fun uploadGeometry() {
-        val requiredFloats = geometry.floatCount
-        if (requiredFloats == 0) return
-        val cpuBuffer = ensureFloatBuffer(requiredFloats)
-        cpuBuffer.clear()
-        cpuBuffer.put(geometry.data, 0, requiredFloats)
-        cpuBuffer.flip()
-
-        val requiredBytes = requiredFloats * AssAtlasVertexBuffer.BYTES_PER_FLOAT
+        if (geometry.vertexBytes == 0 || geometry.indexBytes == 0) return
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vertexBufferId)
-        if (requiredBytes > gpuBufferCapacityBytes) {
-            gpuBufferCapacityBytes = nextPowerOfTwo(requiredBytes)
+        if (geometry.vertexBytes > gpuVertexCapacityBytes) {
+            gpuVertexCapacityBytes = nextPowerOfTwo(geometry.vertexBytes)
             GLES20.glBufferData(
                 GLES20.GL_ARRAY_BUFFER,
-                gpuBufferCapacityBytes,
+                gpuVertexCapacityBytes,
                 null,
                 GLES20.GL_DYNAMIC_DRAW,
             )
         }
-        GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, 0, requiredBytes, cpuBuffer)
+        GLES20.glBufferSubData(
+            GLES20.GL_ARRAY_BUFFER,
+            0,
+            geometry.vertexBytes,
+            geometry.vertices.duplicate(),
+        )
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, indexBufferId)
+        if (geometry.indexBytes > gpuIndexCapacityBytes) {
+            gpuIndexCapacityBytes = nextPowerOfTwo(geometry.indexBytes)
+            GLES20.glBufferData(
+                GLES20.GL_ELEMENT_ARRAY_BUFFER,
+                gpuIndexCapacityBytes,
+                null,
+                GLES20.GL_DYNAMIC_DRAW,
+            )
+        }
+        GLES20.glBufferSubData(
+            GLES20.GL_ELEMENT_ARRAY_BUFFER,
+            0,
+            geometry.indexBytes,
+            geometry.indices.duplicate(),
+        )
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GlUtil.checkGlError()
     }
 
-    private fun ensureFloatBuffer(requiredFloats: Int): FloatBuffer {
-        if (floatBuffer == null || floatBufferCapacity < requiredFloats) {
-            floatBufferCapacity = nextPowerOfTwo(requiredFloats)
-            floatBuffer = ByteBuffer.allocateDirect(floatBufferCapacity * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer()
-        }
-        return requireNotNull(floatBuffer)
-    }
-
-    private fun prepareUploadBuffer(bytes: ByteArray): ByteBuffer {
-        if (uploadBuffer == null || uploadBufferCapacity < bytes.size) {
-            uploadBufferCapacity = nextPowerOfTwo(bytes.size.coerceAtLeast(1))
+    private fun prepareRegionBuffer(bytes: ByteBuffer, pageWidth: Int, rect: DirtyRect): ByteBuffer {
+        val required = rect.width * rect.height
+        if (uploadBuffer == null || uploadBufferCapacity < required) {
+            uploadBufferCapacity = nextPowerOfTwo(required.coerceAtLeast(1))
             uploadBuffer = ByteBuffer.allocateDirect(uploadBufferCapacity)
                 .order(ByteOrder.nativeOrder())
         }
         return requireNotNull(uploadBuffer).apply {
             clear()
-            put(bytes)
+            val source = bytes.duplicate()
+            repeat(rect.height) { row ->
+                val offset = (rect.top + row) * pageWidth + rect.left
+                source.position(offset)
+                source.limit(offset + rect.width)
+                put(source)
+            }
             flip()
         }
+    }
+
+    private fun dirtyRect(frame: AssAtlasFrame, page: Int, width: Int, height: Int): DirtyRect? {
+        if (frame.dirtyRects.size != frame.pageWidths.size * 4) return null
+        val offset = page * 4
+        val left = frame.dirtyRects[offset]
+        val top = frame.dirtyRects[offset + 1]
+        val dirtyWidth = frame.dirtyRects[offset + 2]
+        val dirtyHeight = frame.dirtyRects[offset + 3]
+        if (left < 0 || top < 0 || dirtyWidth < 0 || dirtyHeight < 0 ||
+            left.toLong() + dirtyWidth > width || top.toLong() + dirtyHeight > height
+        ) return null
+        return DirtyRect(left, top, dirtyWidth, dirtyHeight)
+    }
+
+    private fun initializePbos() {
+        val ids = IntArray(2)
+        GLES30.glGenBuffers(ids.size, ids, 0)
+        if (ids.all { it != 0 }) {
+            pboIds = ids
+            pboCapacities = IntArray(ids.size)
+            pboEnabled = true
+            reportMode(MODE_GLES3_PBO)
+        } else {
+            val validIds = ids.filter { it != 0 }.toIntArray()
+            if (validIds.isNotEmpty()) GLES30.glDeleteBuffers(validIds.size, validIds, 0)
+            reportMode(MODE_GLES3_DIRECT)
+        }
+    }
+
+    private fun uploadGles3Region(rect: DirtyRect, source: ByteBuffer) {
+        if (pboEnabled && uploadGles3RegionWithPbo(rect, source)) return
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, 0)
+        GLES30.glTexSubImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            rect.left,
+            rect.top,
+            rect.width,
+            rect.height,
+            GLES30.GL_RED,
+            GLES20.GL_UNSIGNED_BYTE,
+            source,
+        )
+        reportMode(MODE_GLES3_DIRECT)
+    }
+
+    private fun uploadGles3RegionWithPbo(rect: DirtyRect, source: ByteBuffer): Boolean {
+        val required = source.remaining()
+        val slot = nextPbo
+        nextPbo = (nextPbo + 1) % pboIds.size
+        return try {
+            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {
+                // Clear stale errors so only this PBO operation controls fallback.
+            }
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, pboIds[slot])
+            if (pboCapacities[slot] < required) {
+                pboCapacities[slot] = nextPowerOfTwo(required.coerceAtLeast(1))
+                GLES30.glBufferData(
+                    GLES30.GL_PIXEL_UNPACK_BUFFER,
+                    pboCapacities[slot],
+                    null,
+                    GLES30.GL_STREAM_DRAW,
+                )
+            }
+            val mapped = GLES30.glMapBufferRange(
+                GLES30.GL_PIXEL_UNPACK_BUFFER,
+                0,
+                required,
+                GLES30.GL_MAP_WRITE_BIT or GLES30.GL_MAP_INVALIDATE_BUFFER_BIT,
+            ) as? ByteBuffer
+            if (mapped == null) return disablePbos()
+            mapped.clear()
+            mapped.limit(required)
+            mapped.put(source.duplicate())
+            if (!GLES30.glUnmapBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER)) return disablePbos()
+            GLES30.glTexSubImage2D(
+                GLES20.GL_TEXTURE_2D,
+                0,
+                rect.left,
+                rect.top,
+                rect.width,
+                rect.height,
+                GLES30.GL_RED,
+                GLES20.GL_UNSIGNED_BYTE,
+                null,
+            )
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, 0)
+            if (GLES20.glGetError() != GLES20.GL_NO_ERROR) disablePbos() else {
+                reportMode(MODE_GLES3_PBO)
+                true
+            }
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Disabling subtitle PBO uploads", error)
+            disablePbos()
+        }
+    }
+
+    private fun disablePbos(): Boolean {
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, 0)
+        deletePbos()
+        reportMode(MODE_GLES3_DIRECT)
+        return false
+    }
+
+    private fun deletePbos() {
+        if (pboIds.isNotEmpty()) GLES30.glDeleteBuffers(pboIds.size, pboIds, 0)
+        pboIds = IntArray(0)
+        pboCapacities = IntArray(0)
+        pboEnabled = false
+        nextPbo = 0
     }
 
     private fun deleteTextures() {
@@ -433,6 +587,7 @@ internal class AssAtlasGlRenderer {
         }
         textureWidths = IntArray(0)
         textureHeights = IntArray(0)
+        uploadedContentSerial = 0L
     }
 
     private fun nextPowerOfTwo(value: Int): Int {
@@ -441,8 +596,18 @@ internal class AssAtlasGlRenderer {
         return result.coerceAtLeast(value)
     }
 
+    private fun reportMode(mode: String) {
+        currentMode = mode
+        statsCollector?.recordOpenGlMode(mode)
+    }
+
     private companion object {
         const val TAG = "AssAtlasGlRenderer"
+        const val MODE_GLES2 = "GLES2 CPU masks, direct full upload"
+        const val MODE_GLES3_DIRECT = "GLES3 CPU masks, direct dirty upload"
+        const val MODE_GLES3_PBO = "GLES3 CPU masks, PBO dirty upload"
+
+        data class DirtyRect(val left: Int, val top: Int, val width: Int, val height: Int)
 
         val VERTEX_SHADER = """
             attribute vec2 a_Position;
