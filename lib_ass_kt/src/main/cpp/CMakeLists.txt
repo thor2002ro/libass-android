@@ -10,6 +10,7 @@ cmake_minimum_required(VERSION 3.22.1)
 # with ${CMAKE_PROJECT_NAME} (both CMake variables are in-sync within the top level
 # build script scope).
 project("asskt")
+include("${CMAKE_CURRENT_LIST_DIR}/../../../../cmake/native-flags.cmake")
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
 # You can define multiple libraries, and CMake builds them for you.
@@ -29,12 +30,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED AssKt.c)
 find_package(lib_ass REQUIRED CONFIG)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME "asskt")
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
-    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -O3 -flto=thin)
-    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -flto=thin)
-    if(ANDROID_ABI STREQUAL "armeabi-v7a")
-        target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -mfpu=neon)
-        target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -mthumb)
-    endif()
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${LIBASS_COMPILE_FLAGS})
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE ${LIBASS_OPT_FLAGS})
 endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
         lib_ass::ass

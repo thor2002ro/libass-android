@@ -6,12 +6,7 @@ val libassPatchDir = rootProject.layout.projectDirectory.dir("patches/libass")
 val libassPatchFiles = libassPatchDir.asFileTree.matching {
     include("*.patch")
 }
-val libassSourceDir = layout.projectDirectory.dir("src/main/cpp/libass-cmake/src/ass")
-val libassCmakePatchDir = rootProject.layout.projectDirectory.dir("patches/libass-cmake")
-val libassCmakePatchFiles = libassCmakePatchDir.asFileTree.matching {
-    include("*.patch")
-}
-val libassCmakeSourceDir = layout.projectDirectory.dir("src/main/cpp/libass-cmake")
+val libassSourceDir = layout.projectDirectory.dir("src/main/cpp/sources/ass")
 
 val applyLibassPatches = tasks.register("applyLibassPatches") {
     group = "build setup"
@@ -41,7 +36,7 @@ val applyLibassPatches = tasks.register("applyLibassPatches") {
             if (git("apply", "--check", patchFile.absolutePath, ignoreExit = true) != 0) {
                 throw org.gradle.api.GradleException(
                     "Cannot apply libass patch ${patchFile.name}. Reset " +
-                        "lib_ass/src/main/cpp/libass-cmake/src/ass to the tracked submodule commit, then rerun Gradle."
+                        "the freshly fetched libass source, then rerun Gradle."
                 )
             }
             git("apply", patchFile.absolutePath)
@@ -49,43 +44,9 @@ val applyLibassPatches = tasks.register("applyLibassPatches") {
     }
 }
 
-val applyLibassCmakePatches = tasks.register("applyLibassCmakePatches") {
-    group = "build setup"
-    description = "Applies wrapper-owned patches to the vendored libass-cmake build files."
-    inputs.files(libassCmakePatchFiles)
-
-    doLast {
-        val patchFiles = libassCmakePatchFiles.files.sortedBy { it.name }
-        val sourceDir = libassCmakeSourceDir.asFile
-        check(patchFiles.isNotEmpty()) {
-            "Missing libass-cmake patches in ${libassCmakePatchDir.asFile.absolutePath}"
-        }
-        check(sourceDir.isDirectory) { "Missing libass-cmake source: ${sourceDir.absolutePath}" }
-
-        fun git(vararg args: String, ignoreExit: Boolean = false): Int =
-            providers.exec {
-                workingDir = sourceDir
-                commandLine("git", "-c", "core.autocrlf=false", *args)
-                isIgnoreExitValue = ignoreExit
-            }.result.get().exitValue
-
-        for (patchFile in patchFiles) {
-            if (git("apply", "--reverse", "--check", "--ignore-space-change", patchFile.absolutePath, ignoreExit = true) == 0) {
-                continue
-            }
-            if (git("apply", "--check", "--ignore-space-change", patchFile.absolutePath, ignoreExit = true) != 0) {
-                throw org.gradle.api.GradleException(
-                    "Cannot apply libass-cmake patch ${patchFile.name}. Reset the tracked build files, then rerun Gradle."
-                )
-            }
-            git("apply", "--ignore-space-change", patchFile.absolutePath)
-        }
-    }
-}
-
 tasks.configureEach {
     if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
-        dependsOn(applyLibassPatches, applyLibassCmakePatches)
+        dependsOn(applyLibassPatches)
     }
 }
 

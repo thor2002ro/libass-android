@@ -8,7 +8,7 @@ android_ndk_version="$(sed -n 's/^androidNdkVersion=//p' "$repo/gradle.propertie
     exit 1
 }
 
-required_tools=(java git autoreconf autoconf automake libtoolize autopoint gperf make curl unzip pkg-config perl)
+required_tools=(java git autoreconf autoconf automake libtoolize autopoint gperf make curl unzip pkg-config perl python3 ninja)
 android_sdk_packages=(
     "platform-tools"
     "platforms;android-36"
@@ -44,6 +44,7 @@ install_missing_tools() {
                 automake) apt_packages+=(automake) ;;
                 libtoolize) apt_packages+=(libtool) ;;
                 pkg-config) apt_packages+=(pkg-config) ;;
+                ninja) apt_packages+=(ninja-build) ;;
                 *) apt_packages+=("$tool") ;;
             esac
         done
@@ -87,6 +88,19 @@ install_missing_tools() {
 }
 
 install_missing_tools
+export CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
+
+meson_root="${XDG_CACHE_HOME:-$HOME/.cache}/libass-android/meson"
+if [[ -d "$meson_root/.git" ]]; then
+    git -C "$meson_root" fetch --depth 1 origin master
+    git -C "$meson_root" checkout --detach FETCH_HEAD
+elif [[ -e "$meson_root" ]]; then
+    echo "Meson cache path exists but is not a Git checkout: $meson_root" >&2
+    exit 1
+else
+    git clone --depth 1 --branch master https://github.com/mesonbuild/meson.git "$meson_root"
+fi
+export LIBASS_MESON="$meson_root/meson.py"
 
 install_android_sdk() {
     local sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/android-sdk}}"
@@ -178,19 +192,41 @@ printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
 tr -d '\r' < gradlew > .gradlew-wsl
 chmod +x .gradlew-wsl
 
-cmake_dir="$repo/lib_ass/src/main/cpp/libass-cmake"
-for source_dir in unibreak fribidi fontconfig ass expat harfbuzz freetype; do
-    git -C "$cmake_dir/src/$source_dir" -c core.autocrlf=false checkout-index -f -a
-done
-git -C "$cmake_dir/src/ass" -c core.autocrlf=false reset --hard HEAD
-git -C "$cmake_dir/src/ass" -c core.autocrlf=false clean -fdx
+sources_dir="$repo/lib_ass/src/main/cpp/sources"
+rm -rf "$sources_dir"
+mkdir -p "$sources_dir"
+
+clone_source() {
+    local name="$1"
+    local url="$2"
+    git clone --depth 1 --recurse-submodules "$url" "$sources_dir/$name"
+    git -C "$sources_dir/$name" submodule foreach --recursive \
+        'git fetch --depth 1 origin HEAD && git checkout --detach FETCH_HEAD'
+}
+
+clone_source ass https://github.com/libass/libass.git
+clone_source expat https://github.com/libexpat/libexpat.git
+clone_source fontconfig https://gitlab.freedesktop.org/fontconfig/fontconfig.git
+clone_source freetype https://gitlab.freedesktop.org/freetype/freetype.git
+clone_source fribidi https://github.com/fribidi/fribidi.git
+clone_source harfbuzz https://github.com/harfbuzz/harfbuzz.git
+clone_source unibreak https://github.com/adah1972/libunibreak.git
+
+rm -rf "$repo/lib_ass/.cxx"
+perl -pi -e 's/\r$//' \
+    "$sources_dir/unibreak/autogen.sh" \
+    "$sources_dir/fribidi/autogen.sh" \
+    "$sources_dir/ass/autogen.sh" \
+    "$sources_dir/expat/expat/Makefile.am" \
+    "$sources_dir/expat/expat/configure.ac" \
+    "$sources_dir/expat/expat/conftools/get-version.sh"
+./.gradlew-wsl :lib_ass:clean
 ./.gradlew-wsl :lib_ass:applyLibassPatches
 
-(cd "$cmake_dir/src/unibreak" && NOCONFIGURE=1 ./autogen.sh)
-(cd "$cmake_dir/src/fribidi" && NOCONFIGURE=1 ./autogen.sh)
-(cd "$cmake_dir/src/fontconfig" && NOCONFIGURE=1 ./autogen.sh)
-(cd "$cmake_dir/src/ass" && ./autogen.sh)
-(cd "$cmake_dir/src/expat/expat" && ./buildconf.sh)
+(cd "$sources_dir/unibreak" && NOCONFIGURE=1 ./autogen.sh)
+(cd "$sources_dir/fribidi" && NOCONFIGURE=1 ./autogen.sh)
+(cd "$sources_dir/ass" && ./autogen.sh)
+(cd "$sources_dir/expat/expat" && tr -d '\r' < ./buildconf.sh | bash)
 
 ./.gradlew-wsl :lib_ass:assembleRelease
 

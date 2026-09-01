@@ -10,13 +10,9 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
-      with:
-        submodules: recursive
 
-    - name: Run setup-libraries composite action
-      uses: ./lib_ass/src/main/cpp/libass-cmake/.github/actions/setup-libraries
-      with:
-        libass-cmake-path: ${{ github.workspace }}/lib_ass/src/main/cpp/libass-cmake
+    - name: Build latest libass sources
+      run: ./rebuild-libass-wsl.sh
 
     - name: Publish to Maven Central Repository
       run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache
