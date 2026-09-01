@@ -28,6 +28,14 @@ add_library(${CMAKE_PROJECT_NAME} SHARED AssKt.c)
 # Add these two lines.
 find_package(lib_ass REQUIRED CONFIG)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME "asskt")
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -O3 -flto=thin)
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -flto=thin)
+    if(ANDROID_ABI STREQUAL "armeabi-v7a")
+        target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -mfpu=neon)
+        target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -mthumb)
+    endif()
+endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
         lib_ass::ass
         android

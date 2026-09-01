@@ -35,3 +35,11 @@ target_link_directories(${CMAKE_PROJECT_NAME} PUBLIC ${CMAKE_BINARY_DIR}/lib)
 target_link_libraries(${CMAKE_PROJECT_NAME}
         "-Wl,--whole-archive" expat fontconfig libass.a fribidi freetype harfbuzz unibreak "-Wl,--no-whole-archive"
         z)
+
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -O3 -flto=thin)
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -flto=thin)
+    if(ANDROID_ABI STREQUAL "armeabi-v7a")
+        target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -mfpu=neon)
+    endif()
+endif()

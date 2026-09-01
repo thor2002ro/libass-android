@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-android_ndk_version="$(sed -n 's/^androidNdkVersion=//p' "$repo/gradle.properties" | head -n 1)"
+android_ndk_version="$(sed -n 's/^androidNdkVersion=//p' "$repo/gradle.properties" | head -n 1 | tr -d '\r')"
 [[ -n "$android_ndk_version" ]] || {
     echo "androidNdkVersion is missing from $repo/gradle.properties"
     exit 1
@@ -155,10 +155,28 @@ install_android_sdk() {
 install_android_sdk
 
 cd "$repo"
+local_properties="$repo/local.properties"
+local_properties_backup="$(mktemp)"
+had_local_properties=false
+if [[ -f "$local_properties" ]]; then
+    cp "$local_properties" "$local_properties_backup"
+    had_local_properties=true
+fi
+
+restore_local_configuration() {
+    rm -f "$repo/.gradlew-wsl"
+    if $had_local_properties; then
+        cp "$local_properties_backup" "$local_properties"
+    else
+        rm -f "$local_properties"
+    fi
+    rm -f "$local_properties_backup"
+}
+trap restore_local_configuration EXIT
+
 printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
 tr -d '\r' < gradlew > .gradlew-wsl
 chmod +x .gradlew-wsl
-trap 'rm -f "$repo/.gradlew-wsl"' EXIT
 
 cmake_dir="$repo/lib_ass/src/main/cpp/libass-cmake"
 for source_dir in unibreak fribidi fontconfig ass expat harfbuzz freetype; do
