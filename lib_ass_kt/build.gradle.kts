@@ -13,6 +13,7 @@ android {
     defaultConfig {
         minSdk = 21
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "VERSION_NAME", "\"${providers.gradleProperty("VERSION_NAME").get()}\"")
         consumerProguardFiles("consumer-rules.pro")
         externalNativeBuild {
             cmake {
@@ -22,6 +23,7 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         prefab = true
     }
 
