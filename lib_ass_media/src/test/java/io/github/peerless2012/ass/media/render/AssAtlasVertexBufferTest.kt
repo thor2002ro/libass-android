@@ -5,6 +5,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class AssAtlasVertexBufferTest {
 
@@ -23,20 +25,21 @@ class AssAtlasVertexBufferTest {
         )
 
         assertTrue(geometry.update(frame, sourceWidth = 100, sourceHeight = 100))
-        assertEquals(6, geometry.vertexCount)
+        assertEquals(4, geometry.vertexCount)
+        assertEquals(6, geometry.indexCount)
         assertEquals(1, geometry.runCount)
         assertEquals(0, geometry.runPages[0])
-        assertEquals(0, geometry.runFirstVertices[0])
-        assertEquals(6, geometry.runVertexCounts[0])
+        assertEquals(0, geometry.runFirstIndices[0])
+        assertEquals(6, geometry.runIndexCounts[0])
 
-        assertFloatEquals(-0.8f, geometry.data[0])
-        assertFloatEquals(0.6f, geometry.data[1])
-        assertFloatEquals(1f / 8f, geometry.data[2])
-        assertFloatEquals(1f / 8f, geometry.data[3])
-        assertFloatEquals(0x11 / 255f, geometry.data[4])
-        assertFloatEquals(0x22 / 255f, geometry.data[5])
-        assertFloatEquals(0x33 / 255f, geometry.data[6])
-        assertFloatEquals((0xFF - 0x44) / 255f, geometry.data[7])
+        assertFloatEquals(-0.8f, geometry.vertices.getFloat(0))
+        assertFloatEquals(0.6f, geometry.vertices.getFloat(4))
+        assertFloatEquals(1f / 8f, geometry.vertices.getFloat(8))
+        assertFloatEquals(1f / 8f, geometry.vertices.getFloat(12))
+        assertEquals(0x11, geometry.vertices.get(16).toInt() and 0xFF)
+        assertEquals(0x22, geometry.vertices.get(17).toInt() and 0xFF)
+        assertEquals(0x33, geometry.vertices.get(18).toInt() and 0xFF)
+        assertEquals(0xFF - 0x44, geometry.vertices.get(19).toInt() and 0xFF)
     }
 
     @Test
@@ -57,8 +60,8 @@ class AssAtlasVertexBufferTest {
         assertTrue(geometry.update(frame, 10, 10))
         assertEquals(3, geometry.runCount)
         assertEquals(listOf(0, 1, 0), geometry.runPages.take(3))
-        assertEquals(listOf(0, 6, 12), geometry.runFirstVertices.take(3))
-        assertEquals(listOf(6, 6, 6), geometry.runVertexCounts.take(3))
+        assertEquals(listOf(0, 6, 12), geometry.runFirstIndices.take(3))
+        assertEquals(listOf(6, 6, 6), geometry.runIndexCounts.take(3))
     }
 
     @Test
@@ -70,10 +73,12 @@ class AssAtlasVertexBufferTest {
             pageHeights = intArrayOf(16),
             quads = intArrayOf(1, 2, 4, 5, 0x00000000, 0, 3, 4),
             changed = AssAtlasFrame.CHANGE_POSITION,
+            dirtyRects = IntArray(0),
+            contentSerial = 1,
         )
 
         assertTrue(geometry.update(frame, 100, 50))
-        assertEquals(6, geometry.vertexCount)
+        assertEquals(4, geometry.vertexCount)
     }
 
     @Test
@@ -95,11 +100,18 @@ class AssAtlasVertexBufferTest {
         heights: IntArray,
         quads: IntArray,
     ) = AssAtlasFrame(
-        pages = pages,
+        pages = Array(pages.size) { index ->
+            ByteBuffer.allocateDirect(pages[index].size).order(ByteOrder.nativeOrder()).apply {
+                put(pages[index])
+                flip()
+            }
+        },
         pageWidths = widths,
         pageHeights = heights,
         quads = quads,
         changed = AssAtlasFrame.CHANGE_CONTENT,
+        dirtyRects = IntArray(widths.size * 4),
+        contentSerial = 1,
     )
 
     private fun assertFloatEquals(expected: Float, actual: Float) {

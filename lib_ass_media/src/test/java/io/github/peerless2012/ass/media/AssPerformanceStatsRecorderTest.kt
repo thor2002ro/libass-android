@@ -4,6 +4,7 @@ import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.AssFrame
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import java.nio.ByteBuffer
 
 class AssPerformanceStatsRecorderTest {
 
@@ -59,7 +60,7 @@ class AssPerformanceStatsRecorderTest {
     fun recordsAtlasFrames() {
         val collector = AssPerformanceStatsCollector()
         val frame = AssAtlasFrame(
-            pages = arrayOf(ByteArray(256), ByteArray(32)),
+            pages = arrayOf(ByteBuffer.allocateDirect(256), ByteBuffer.allocateDirect(32)),
             pageWidths = intArrayOf(16, 8),
             pageHeights = intArrayOf(16, 4),
             quads = intArrayOf(
@@ -67,6 +68,8 @@ class AssPerformanceStatsRecorderTest {
                 8, 8, 5, 6, 0, 0, 4, 0,
             ),
             changed = AssAtlasFrame.CHANGE_CONTENT,
+            dirtyRects = intArrayOf(0, 0, 16, 16, 0, 0, 8, 4),
+            contentSerial = 1,
         )
 
         collector.record(2_000_000, frame)
