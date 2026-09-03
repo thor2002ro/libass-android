@@ -4,8 +4,27 @@ import io.github.peerless2012.ass.AssAtlasFrame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class AssAtlasFrameValidatorTest {
+
+    @Test
+    fun rejectsPacketWithInvalidHeaderBeforeReadingRecords() {
+        val packet = ByteBuffer.allocateDirect(AssAtlasFrame.HEADER_SIZE)
+            .order(ByteOrder.nativeOrder())
+            .apply {
+                putInt(0, 0x12345678)
+                putInt(4, AssAtlasFrame.PACKET_VERSION)
+                putInt(8, capacity())
+            }
+
+        val result = AssAtlasFrameValidator.validate(
+            frame = AssAtlasFrame(packet),
+            allowIncremental = true,
+        )
+
+        assertTrue(result is AssAtlasFrameValidator.ValidationResult.Invalid)
+    }
 
     @Test
     fun acceptsMetadataOnlyFrameWithoutMaskPayload() {
@@ -146,7 +165,7 @@ class AssAtlasFrameValidatorTest {
     }
 
     @Test
-    fun rejectsInvalidActiveBoundsStride() {
+    fun rejectsNegativeActiveBounds() {
         val result = AssAtlasFrameValidator.validate(
             frame = frame(
                 changed = AssAtlasFrame.CHANGE_METADATA,
@@ -155,7 +174,7 @@ class AssAtlasFrameValidatorTest {
                 patchRects = IntArray(0),
                 contentSerial = 7L,
                 baseContentSerial = 7L,
-                activeBounds = intArrayOf(0, 0, 1),
+                activeBounds = intArrayOf(0, 0, -1, 1),
             ),
             allowIncremental = true,
         )

@@ -271,42 +271,39 @@ internal class AssAtlasGlRenderer(
 
     private fun replacePages(frame: AssAtlasFrame): Boolean {
         val startedNs = System.nanoTime()
-        val pages = frame.pages
-        if (frame.quads.isNotEmpty() && pages == null) return false
-        if (frame.pageWidths.size != frame.pageHeights.size) return false
-        if (pages != null && pages.size != frame.pageWidths.size) return false
+        val pageCount = frame.pageCount
 
-        if (pages == null || pages.isEmpty()) {
+        if (pageCount == 0) {
             deleteTextures()
             textureWidths = IntArray(0)
             textureHeights = IntArray(0)
             uploadedContentSerial = frame.contentSerial
-            return frame.quads.isEmpty()
+            return frame.imageCount == 0
         }
 
         // Validate the complete payload before changing any persistent texture.
         // This prevents a malformed later page from leaving a partially updated
         // atlas that would corrupt subsequent position-only frames.
-        for (index in pages.indices) {
-            val width = frame.pageWidths[index]
-            val height = frame.pageHeights[index]
+        for (index in 0 until pageCount) {
+            val width = frame.pageWidth(index)
+            val height = frame.pageHeight(index)
             val expectedBytes = width.toLong() * height
             if (width <= 0 || height <= 0 || expectedBytes > Int.MAX_VALUE ||
-                pages[index].capacity() < expectedBytes.toInt()
+                frame.pageDataLength(index) < expectedBytes || !frame.pageDataFits(index)
             ) {
                 return false
             }
         }
 
-        while (textureIds.size < pages.size) textureIds += 0
+        while (textureIds.size < pageCount) textureIds += 0
 
-        val newWidths = frame.pageWidths.copyOf()
-        val newHeights = frame.pageHeights.copyOf()
+        val newWidths = IntArray(pageCount) { frame.pageWidth(it) }
+        val newHeights = IntArray(pageCount) { frame.pageHeight(it) }
         var uploadedBytes = 0L
-        for (index in pages.indices) {
+        for (index in 0 until pageCount) {
             val width = newWidths[index]
             val height = newHeights[index]
-            val bytes = pages[index]
+            val bytes = frame.positionPageData(index)
             var texture = textureIds[index]
             val sizeChanged = index !in textureWidths.indices ||
                 textureWidths[index] != width || textureHeights[index] != height
@@ -321,9 +318,8 @@ internal class AssAtlasGlRenderer(
                     val rect = DirtyRect(0, 0, width, height)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
                     GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
-                    uploadGles3Region(rect, bytes.duplicate().apply { clear(); limit(width * height) })
+                    uploadGles3Region(rect, bytes)
                 } else {
-                    val buffer = bytes.duplicate().apply { clear(); limit(width * height) }
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
                     GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
                     GLES20.glTexSubImage2D(
@@ -335,14 +331,14 @@ internal class AssAtlasGlRenderer(
                         height,
                         GLES20.GL_ALPHA,
                         GLES20.GL_UNSIGNED_BYTE,
-                        buffer,
+                        bytes,
                     )
                 }
             }
             uploadedBytes += width.toLong() * height
         }
 
-        while (textureIds.size > pages.size) {
+        while (textureIds.size > pageCount) {
             val id = textureIds.removeAt(textureIds.lastIndex)
             if (id != 0) GLES20.glDeleteTextures(1, intArrayOf(id), 0)
         }
@@ -360,20 +356,19 @@ internal class AssAtlasGlRenderer(
         if (!isGles3 || !pageLayoutMatches(frame) ||
             frame.baseContentSerial != uploadedContentSerial
         ) return false
-        val patches = frame.patches ?: return false
+        if (frame.patchCount == 0) return false
         val startedNs = System.nanoTime()
         var uploadedBytes = 0L
-        patches.indices.forEach { patch ->
-            val offset = patch * AssAtlasFrame.PATCH_RECT_STRIDE
-            val page = frame.patchRects[offset]
+        repeat(frame.patchCount) { patch ->
+            val page = frame.patchValue(patch, 0)
             val rect = DirtyRect(
-                left = frame.patchRects[offset + 1],
-                top = frame.patchRects[offset + 2],
-                width = frame.patchRects[offset + 3],
-                height = frame.patchRects[offset + 4],
+                left = frame.patchValue(patch, 1),
+                top = frame.patchValue(patch, 2),
+                width = frame.patchValue(patch, 3),
+                height = frame.patchValue(patch, 4),
             )
             val byteCount = rect.width * rect.height
-            val source = patches[patch].duplicate().apply { clear(); limit(byteCount) }
+            val source = frame.positionPatchData(patch)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureIds[page])
             GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
             uploadGles3Region(rect, source)
@@ -393,7 +388,6 @@ internal class AssAtlasGlRenderer(
         if (texture == 0) return 0
 
         try {
-            val buffer = bytes.duplicate().apply { clear(); limit(width * height) }
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
             GLES20.glTexParameteri(
                 GLES20.GL_TEXTURE_2D,
@@ -426,7 +420,7 @@ internal class AssAtlasGlRenderer(
                     0,
                     GLES30.GL_RED,
                     GLES20.GL_UNSIGNED_BYTE,
-                    buffer,
+                    bytes,
                 )
             } else {
                 GLES20.glTexImage2D(
@@ -438,7 +432,7 @@ internal class AssAtlasGlRenderer(
                     0,
                     GLES20.GL_ALPHA,
                     GLES20.GL_UNSIGNED_BYTE,
-                    buffer,
+                    bytes,
                 )
             }
             GlUtil.checkGlError()
@@ -449,9 +443,12 @@ internal class AssAtlasGlRenderer(
         }
     }
 
-    private fun pageLayoutMatches(frame: AssAtlasFrame): Boolean =
-        frame.pageWidths.contentEquals(textureWidths) &&
-            frame.pageHeights.contentEquals(textureHeights)
+    private fun pageLayoutMatches(frame: AssAtlasFrame): Boolean {
+        if (frame.pageCount != textureWidths.size || frame.pageCount != textureHeights.size) return false
+        return (0 until frame.pageCount).all {
+            frame.pageWidth(it) == textureWidths[it] && frame.pageHeight(it) == textureHeights[it]
+        }
+    }
 
     private fun uploadGeometry() {
         if (geometry.vertexBytes == 0 || geometry.indexBytes == 0) return
@@ -551,7 +548,7 @@ internal class AssAtlasGlRenderer(
             if (mapped == null) return disablePbos()
             mapped.clear()
             mapped.limit(required)
-            mapped.put(source.duplicate())
+            mapped.put(source)
             if (!GLES30.glUnmapBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER)) return disablePbos()
             GLES30.glTexSubImage2D(
                 GLES20.GL_TEXTURE_2D,

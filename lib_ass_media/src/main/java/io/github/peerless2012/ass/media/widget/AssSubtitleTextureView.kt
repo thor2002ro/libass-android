@@ -314,9 +314,10 @@ class AssSubtitleTextureView :
             if (result == AssAtlasGlRenderer.DrawResult.REDRAWN_CONTENT ||
                 result == AssAtlasGlRenderer.DrawResult.REDRAWN_EMPTY
             ) {
-                val activePixels = frame?.activeBounds?.takeIf { it.size == 4 }?.let {
-                    it[2].toLong().coerceAtLeast(0L) * it[3].toLong().coerceAtLeast(0L)
-                } ?: 0L
+                val activePixels = if (frame?.hasActiveBounds == true) {
+                    frame.activeBound(2).toLong().coerceAtLeast(0L) *
+                        frame.activeBound(3).toLong().coerceAtLeast(0L)
+                } else 0L
                 assHandler.config.performanceStatsCollector?.recordGlUpload(
                     uploadedBytes = 0L,
                     submissionDurationNs = 0L,
