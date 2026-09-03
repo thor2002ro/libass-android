@@ -1,0 +1,195 @@
+From a4c5e46b7caf3d522e7479589f1bec3d7d417f12 Mon Sep 17 00:00:00 2001
+From: thor2002ro <1249056+thor2002ro@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:50:47 +0300
+Subject: [PATCH] Local: Add ARMv7 NEON half-plane rasterizer
+
+---
+ checkasm/checkasm.h          | 12 ++++-
+ checkasm/rasterizer.c        | 10 ++++
+ libass/Makefile_library.am   |  1 +
+ libass/ass_bitmap_engine.c   |  3 ++
+ libass/c/c_rasterizer_neon.c | 74 ++++++++++++++++++++++++++++++++++++
+ libass/meson.build           |  1 +
+ meson.build                  |  3 +-
+ 7 files changed, 101 insertions(+), 3 deletions(-)
+ create mode 100644 libass/c/c_rasterizer_neon.c
+
+diff --git a/checkasm/checkasm.h b/checkasm/checkasm.h
+index 9413019..ccacdae 100644
+--- a/checkasm/checkasm.h
++++ b/checkasm/checkasm.h
+@@ -111,8 +111,16 @@ int float_near_abs_eps_array_ulp(const float *a, const float *b, float eps,
+      ((func_type *)func_ref)(__VA_ARGS__));\
+     checkasm_set_signal_handler_state(0)
+ 
+-#if CONFIG_ASM
+-#if ARCH_X86
++#if CONFIG_ASM || (defined(__ANDROID__) && defined(__arm__))
++#if defined(__ANDROID__) && defined(__arm__)
++#include <time.h>
++static inline uint64_t readtime(void) {
++    struct timespec time;
++    clock_gettime(CLOCK_MONOTONIC, &time);
++    return (uint64_t) time.tv_sec * 1000000000 + time.tv_nsec;
++}
++#define readtime readtime
++#elif ARCH_X86
+ #if defined(_MSC_VER) && !defined(__clang__)
+ #include <intrin.h>
+ #define readtime() (_mm_lfence(), __rdtsc())
+diff --git a/checkasm/rasterizer.c b/checkasm/rasterizer.c
+index 505dca2..77c7a2a 100644
+--- a/checkasm/rasterizer.c
++++ b/checkasm/rasterizer.c
+@@ -202,6 +202,16 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+         ass_bitmap_engine_init(cpu_flag),
+         ass_bitmap_engine_init(cpu_flag | ASS_FLAG_LARGE_TILES)
+     };
++#if defined(__arm__) && defined(__ARM_NEON)
++    if (cpu_flag & ASS_CPU_FLAG_ARM_NEON) {
++        FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
++        if (checkasm_check_func(ass_fill_halfplane_tile16_neon,
++                               "fill_halfplane_dispatch_tile16") &&
++            engine[0].fill_halfplane != ass_fill_halfplane_tile16_neon)
++            fail();
++        report("fill_halfplane_dispatch_tile16");
++    }
++#endif
+     for (int i = 0; i < 2; i++) {
+         int tile_size = 1 << engine[i].tile_order;
+         check_fill_solid(engine[i].fill_solid, "fill_solid_tile%d", tile_size);
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index e1ee021..2681f5a 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -26,6 +26,7 @@ libass_libass_internal_la_SOURCES = \
+     libass/ass_bitmap_engine.h libass/ass_bitmap_engine.c \
+     libass/ass_arabic_charmap.h libass/ass_arabic_charmap.c \
+     libass/c/rasterizer_template.h libass/c/c_rasterizer.c \
++    libass/c/c_rasterizer_neon.c \
+     libass/c/c_blend_bitmaps.c \
+     libass/c/c_shift.c \
+     libass/c/c_be_blur.c \
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 0bab838..a5520e7 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -205,7 +205,10 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+     }
+ #if defined(__arm__) && defined(__ARM_NEON)
+     if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
++        FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         ShiftFunc ass_shift_neon;
++        if (!(mask & ASS_FLAG_LARGE_TILES))
++            engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+         engine.shift = ass_shift_neon;
+     }
+ #endif
+diff --git a/libass/c/c_rasterizer_neon.c b/libass/c/c_rasterizer_neon.c
+new file mode 100644
+index 0000000..09983c9
+--- /dev/null
++++ b/libass/c/c_rasterizer_neon.c
+@@ -0,0 +1,74 @@
++#include "config.h"
++
++#if defined(__arm__) && defined(__ARM_NEON)
++
++#include "ass_compat.h"
++#include "ass_rasterizer.h"
++
++#include <arm_neon.h>
++#include <stddef.h>
++#include <stdint.h>
++
++
++#define ALIGNMENT  16
++#define TILE_SIZE  16
++#define TILE_ORDER 4
++#define FULL_VALUE (1 << (14 - TILE_ORDER))
++#define RESCALE_AB(ab, scale) \
++    (((ab) * (int64_t) (scale) + ((int64_t) 1 << (45 + TILE_ORDER))) >> (46 + TILE_ORDER))
++#define RESCALE_C(c, scale) \
++    (((int32_t) ((c) >> (7 + TILE_ORDER)) * (int64_t) (scale) + ((int64_t) 1 << 44)) >> 45)
++
++
++static inline uint8x8_t fill_halfplane_line_neon(int16x8_t x,
++                                                  int16_t aa,
++                                                  int16_t cc,
++                                                  int16_t delta)
++{
++    int16x8_t distance = vsubq_s16(vdupq_n_s16(cc), vmulq_n_s16(x, aa));
++    int16x8_t c1 = vaddq_s16(distance, vdupq_n_s16(delta));
++    int16x8_t c2 = vsubq_s16(distance, vdupq_n_s16(delta));
++    int16x8_t zero = vdupq_n_s16(0);
++    int16x8_t full = vdupq_n_s16(FULL_VALUE);
++    c1 = vminq_s16(vmaxq_s16(c1, zero), full);
++    c2 = vminq_s16(vmaxq_s16(c2, zero), full);
++    return vqmovun_s16(vshrq_n_s16(vaddq_s16(c1, c2), 7 - TILE_ORDER));
++}
++
++
++void ass_fill_halfplane_tile16_neon(uint8_t *buf, ptrdiff_t stride,
++                                     int32_t a, int32_t b,
++                                     int64_t c, int32_t scale)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++
++    int16_t aa = RESCALE_AB(a, scale), bb = RESCALE_AB(b, scale);
++    int16_t cc = RESCALE_C(c, scale) + FULL_VALUE / 2 - ((aa + bb) >> 1);
++    int16_t abs_a = aa < 0 ? -aa : aa;
++    int16_t abs_b = bb < 0 ? -bb : bb;
++    int16_t delta = (FFMIN(abs_a, abs_b) + 2) >> 2;
++
++    static const int16_t indices[16] = {
++         0,  1,  2,  3,  4,  5,  6,  7,
++         8,  9, 10, 11, 12, 13, 14, 15,
++    };
++    int16x8_t x0 = vld1q_s16(indices);
++    int16x8_t x1 = vld1q_s16(indices + 8);
++
++    for (int y = 0; y < TILE_SIZE; y++) {
++        vst1_u8(buf, fill_halfplane_line_neon(x0, aa, cc, delta));
++        vst1_u8(buf + 8, fill_halfplane_line_neon(x1, aa, cc, delta));
++        buf += stride;
++        cc -= bb;
++    }
++}
++
++
++#undef ALIGNMENT
++#undef TILE_SIZE
++#undef TILE_ORDER
++#undef FULL_VALUE
++#undef RESCALE_AB
++#undef RESCALE_C
++
++#endif
+diff --git a/libass/meson.build b/libass/meson.build
+index a0e42c6..8c18ac4 100644
+--- a/libass/meson.build
++++ b/libass/meson.build
+@@ -48,6 +48,7 @@ libass_src = files(
+     'c/c_blend_bitmaps.c',
+     'c/c_blur.c',
+     'c/c_rasterizer.c',
++    'c/c_rasterizer_neon.c',
+     'c/c_shift.c',
+     'ass.c',
+     'ass_arabic_charmap.c',
+diff --git a/meson.build b/meson.build
+index 1272889..25270a9 100644
+--- a/meson.build
++++ b/meson.build
+@@ -454,7 +454,8 @@ endif
+ if get_option('fuzz').enabled()
+     subdir('fuzz')
+ endif
+-if get_option('checkasm').require(enable_asm).allowed()
++arm_neon_intrinsics = generic_cpu_family == 'arm' and cc.get_define('__ARM_NEON').strip() != ''
++if get_option('checkasm').require(enable_asm or arm_neon_intrinsics).allowed()
+     subdir('checkasm')
+ endif
+ 
+-- 
+2.43.0.windows.1
