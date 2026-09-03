@@ -1,0 +1,199 @@
+diff --git a/checkasm/checkasm.c b/checkasm/checkasm.c
+index 0ddd74d..7200942 100644
+--- a/checkasm/checkasm.c
++++ b/checkasm/checkasm.c
+@@ -75,7 +75,7 @@ static const struct {
+     { "SSE2",               "sse2",      ASS_CPU_FLAG_X86_SSE2 },
+     { "SSSE3",              "ssse3",     ASS_CPU_FLAG_X86_SSSE3 },
+     { "AVX2",               "avx2",      ASS_CPU_FLAG_X86_AVX2 },
+-#elif ARCH_AARCH64
++#elif ARCH_AARCH64 || (defined(__arm__) && defined(__ARM_NEON))
+     { "NEON",               "neon",      ASS_CPU_FLAG_ARM_NEON },
+ #endif
+     { 0 }
+diff --git a/checkasm/shift.c b/checkasm/shift.c
+index 9879ce5..7a7409f 100644
+--- a/checkasm/shift.c
++++ b/checkasm/shift.c
+@@ -24,8 +24,8 @@
+ 
+ #define HEIGHT 8
+ #define STRIDE 64
+-#define MIN_WIDTH 2
+-#define REP_COUNT 8
++
++static const int widths[] = { 2, 7, 8, 9, 15, 16, 17, 63 };
+ 
+ static void check_shift(ShiftFunc func)
+ {
+@@ -37,24 +37,24 @@ static void check_shift(ShiftFunc func)
+                  int shift_x, int shift_y);
+ 
+     if (check_func(func, "shift")) {
+-        for (int w = MIN_WIDTH; w <= STRIDE; w++) {
+-            for(int rep = 0; rep < REP_COUNT; rep++) {
+-                memset(buf_ref, 0, sizeof(buf_ref));
+-                memset(buf_new, 0, sizeof(buf_new));
+-                for (int y = 0; y < HEIGHT; y++) {
+-                    for (int x = 0; x < w; x++)
+-                        buf_ref[y * STRIDE + x] = buf_new[y * STRIDE + x] = rnd();
+-                }
+-
+-                int shift_x = rnd() & 63;
+-                int shift_y = rnd() & 63;
++        for (size_t width_index = 0; width_index < sizeof(widths) / sizeof(widths[0]); width_index++) {
++            int w = widths[width_index];
++            for (int shift_y = 0; shift_y < 64; shift_y++) {
++                for (int shift_x = 0; shift_x < 64; shift_x++) {
++                    memset(buf_ref, 0, sizeof(buf_ref));
++                    memset(buf_new, 0, sizeof(buf_new));
++                    for (int y = 0; y < HEIGHT; y++) {
++                        for (int x = 0; x < w; x++)
++                            buf_ref[y * STRIDE + x] = buf_new[y * STRIDE + x] = rnd();
++                    }
+ 
+-                call_ref(buf_ref, STRIDE, w, HEIGHT, shift_x, shift_y);
+-                call_new(buf_new, STRIDE, w, HEIGHT, shift_x, shift_y);
++                    call_ref(buf_ref, STRIDE, w, HEIGHT, shift_x, shift_y);
++                    call_new(buf_new, STRIDE, w, HEIGHT, shift_x, shift_y);
+ 
+-                if (memcmp(buf_ref, buf_new, sizeof(buf_ref))) {
+-                    fail();
+-                    break;
++                    if (memcmp(buf_ref, buf_new, sizeof(buf_ref))) {
++                        fail();
++                        break;
++                    }
+                 }
+             }
+         }
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index e7cbdf3..0bab838 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -155,7 +155,7 @@ unsigned ass_get_cpu_flags(unsigned mask)
+ 
+ #endif
+ 
+-#if ARCH_AARCH64
++#if ARCH_AARCH64 || (defined(__arm__) && defined(__ARM_NEON))
+     flags = ASS_CPU_FLAG_ARM_NEON;
+ #endif
+ 
+@@ -203,5 +203,11 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+     if (mask & ASS_FLAG_WIDE_STRIPE) {
+         BLUR_FUNCTIONS(5, 32, c)
+     }
++#if defined(__arm__) && defined(__ARM_NEON)
++    if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
++        ShiftFunc ass_shift_neon;
++        engine.shift = ass_shift_neon;
++    }
++#endif
+     return engine;
+ }
+diff --git a/libass/ass_bitmap_engine.h b/libass/ass_bitmap_engine.h
+index a0958db..ab403d3 100644
+--- a/libass/ass_bitmap_engine.h
++++ b/libass/ass_bitmap_engine.h
+@@ -98,7 +98,7 @@ enum {
+     ASS_CPU_FLAG_X86_SSE2      = 0x0001,
+     ASS_CPU_FLAG_X86_SSSE3     = 0x0002,
+     ASS_CPU_FLAG_X86_AVX2      = 0x0004,
+-#elif ARCH_AARCH64
++#elif ARCH_AARCH64 || (defined(__arm__) && defined(__ARM_NEON))
+     ASS_CPU_FLAG_ARM_NEON      = 0x0001,
+ #endif
+     ASS_CPU_FLAG_ALL           = 0x0FFF,
+diff --git a/libass/c/c_shift.c b/libass/c/c_shift.c
+index 166267e..2a0a033 100644
+--- a/libass/c/c_shift.c
++++ b/libass/c/c_shift.c
+@@ -23,6 +23,10 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#if defined(__arm__) && defined(__ARM_NEON)
++#include <arm_neon.h>
++#endif
++
+ 
+ #define ALIGNMENT  16
+ 
+@@ -56,3 +60,76 @@ void ass_shift_c(uint8_t *restrict buf, ptrdiff_t stride,
+     int16_t tmp1 = 64 * buf[width - 1] - buf[width - 1] * (int16_t) shift_x;
+     buf[width - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * tmp1) * (int32_t) sy >> 16) + 32) >> 6;
+ }
++
++#if defined(__arm__) && defined(__ARM_NEON)
++static inline int16x8_t shift_x_neon(const uint8_t *src, int16_t shift_x)
++{
++    uint8x8_t left = vld1_u8(src);
++    uint8x8_t right = vld1_u8(src + 1);
++    int16x8_t left16 = vreinterpretq_s16_u16(vmovl_u8(left));
++    int16x8_t delta = vreinterpretq_s16_u16(vsubl_u8(left, right));
++    return vsubq_s16(vshlq_n_s16(left16, 6), vmulq_n_s16(delta, shift_x));
++}
++
++static inline uint8x8_t shift_y_neon(int16x8_t upper, int16x8_t lower, int16_t shift_y)
++{
++    int16x8_t delta = vsubq_s16(upper, lower);
++    int16x8_t correction = vqdmulhq_n_s16(delta, shift_y);
++    return vqrshrun_n_s16(vsubq_s16(upper, correction), 6);
++}
++
++static inline uint8_t shift_pixel(
++    uint8_t upper_left,
++    uint8_t upper_right,
++    uint8_t lower_left,
++    uint8_t lower_right,
++    int16_t shift_x,
++    int16_t shift_y
++) {
++    int16_t upper = 64 * upper_left - (upper_left - upper_right) * shift_x;
++    int16_t lower = 64 * lower_left - (lower_left - lower_right) * shift_x;
++    int16_t correction = (int16_t) (
++        (int16_t) (2 * (upper - lower)) * (int32_t) shift_y >> 16
++    );
++    return (uint8_t) ((upper - correction + 32) >> 6);
++}
++
++void ass_shift_neon(uint8_t *restrict buf, ptrdiff_t stride,
++                    size_t width, size_t height, int shift_x, int shift_y)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++    ASSUME(!(shift_x & ~63) && !(shift_y & ~63));
++    ASSUME(width > 1 && height > 1);
++
++    int16_t sx = shift_x;
++    int16_t sy = shift_y << 9;
++    for (size_t y = 1; y < height; y++) {
++        uint8_t *next = buf + stride;
++        size_t x = 0;
++        for (; x + 8 < width; x += 8) {
++            int16x8_t upper = shift_x_neon(buf + x, sx);
++            int16x8_t lower = shift_x_neon(next + x, sx);
++            vst1_u8(buf + x, shift_y_neon(upper, lower, sy));
++        }
++        for (; x + 1 < width; x++) {
++            buf[x] = shift_pixel(
++                buf[x], buf[x + 1], next[x], next[x + 1], sx, sy
++            );
++        }
++        buf[width - 1] = shift_pixel(
++            buf[width - 1], 0, next[width - 1], 0, sx, sy
++        );
++        buf = next;
++    }
++
++    size_t x = 0;
++    int16x8_t zero = vdupq_n_s16(0);
++    for (; x + 8 < width; x += 8) {
++        int16x8_t upper = shift_x_neon(buf + x, sx);
++        vst1_u8(buf + x, shift_y_neon(upper, zero, sy));
++    }
++    for (; x + 1 < width; x++)
++        buf[x] = shift_pixel(buf[x], buf[x + 1], 0, 0, sx, sy);
++    buf[width - 1] = shift_pixel(buf[width - 1], 0, 0, 0, sx, sy);
++}
++#endif
