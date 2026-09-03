@@ -24,6 +24,9 @@ data class AssHandlerConfig @JvmOverloads constructor(
      */
     val maxSubtitleFps: Float = 60f,
 
+    /** Number of libass workers used to render simultaneous subtitle events. */
+    val renderThreads: Int = 2,
+
     /**
      * Maximum width or height of an alpha-atlas page.
      *
@@ -41,6 +44,7 @@ data class AssHandlerConfig @JvmOverloads constructor(
 ) {
     init {
         require(maxEmbeddedFontBytes >= 0) { "maxEmbeddedFontBytes must not be negative" }
+        require(renderThreads > 0) { "renderThreads must be positive" }
     }
 
     companion object {

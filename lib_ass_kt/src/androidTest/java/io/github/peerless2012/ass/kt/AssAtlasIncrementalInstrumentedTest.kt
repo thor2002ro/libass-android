@@ -127,6 +127,55 @@ class AssAtlasIncrementalInstrumentedTest {
         }
     }
 
+    @Test
+    fun twoWorkerRendererMatchesSerialAtlasOutput() {
+        Ass().use { ass ->
+            ass.createTrack().use { track ->
+                track.readBuffer(
+                    script(
+                        "{\\move(40,80,300,80,0,1000)}Moving\\N" +
+                            "{\\blur2\\bord3\\shad2}Blurred",
+                    ).toByteArray(Charsets.UTF_8),
+                )
+                ass.createRender().use { serial ->
+                    ass.createRender().use { threaded ->
+                        listOf(serial, threaded).forEach { render ->
+                            render.setStorageSize(640, 360)
+                            render.setFrameSize(640, 360)
+                            render.setTrack(track)
+                        }
+
+                        assertEquals(1, serial.setThreads(1))
+                        assertEquals(2, threaded.setThreads(2))
+
+                        val serialFrame = requireNotNull(
+                            serial.renderAtlasFrame(500, 512, allowIncremental = true),
+                        )
+                        val threadedFrame = requireNotNull(
+                            threaded.renderAtlasFrame(500, 512, allowIncremental = true),
+                        )
+
+                        assertEquals(serialFrame.changed, threadedFrame.changed)
+                        assertTrue(serialFrame.pageWidths.contentEquals(threadedFrame.pageWidths))
+                        assertTrue(serialFrame.pageHeights.contentEquals(threadedFrame.pageHeights))
+                        assertTrue(serialFrame.quads.contentEquals(threadedFrame.quads))
+                        val serialPages = requireNotNull(serialFrame.pages)
+                        val threadedPages = requireNotNull(threadedFrame.pages)
+                        assertEquals(serialPages.size, threadedPages.size)
+                        serialPages.indices.forEach { index ->
+                            assertTrue(
+                                "atlas page $index differs between one and two workers",
+                                serialPages[index].toByteArray().contentEquals(
+                                    threadedPages[index].toByteArray(),
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun withRenderer(text: String, block: (io.github.peerless2012.ass.AssRender) -> Unit) {
         Ass().use { ass ->
             ass.createTrack().use { track ->
@@ -155,4 +204,8 @@ class AssAtlasIncrementalInstrumentedTest {
         Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,$text
     """.trimIndent()
+
+    private fun java.nio.ByteBuffer.toByteArray(): ByteArray = duplicate().apply { clear() }.let {
+        ByteArray(it.remaining()).also(it::get)
+    }
 }

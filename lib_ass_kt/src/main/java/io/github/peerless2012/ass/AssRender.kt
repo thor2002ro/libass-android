@@ -24,6 +24,9 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) : AutoCloseabl
         external fun nativeAssRenderSetCacheLimit(render: Long, glyphMax: Int, bitmapMaxSize: Int)
 
         @JvmStatic
+        external fun nativeAssRenderSetThreads(render: Long, threads: Int): Int
+
+        @JvmStatic
         external fun nativeAssRenderSetStorageSize(render: Long, width: Int, height: Int)
 
         @JvmStatic
@@ -79,6 +82,14 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) : AutoCloseabl
         lock.withLock {
             if (released || nativeRender == 0L) return
             nativeAssRenderSetCacheLimit(nativeRender, glyphMax, bitmapMaxSize)
+        }
+    }
+
+    fun setThreads(threads: Int): Int {
+        require(threads > 0) { "threads must be positive" }
+        return lock.withLock {
+            if (released || nativeRender == 0L) return 0
+            nativeAssRenderSetThreads(nativeRender, threads)
         }
     }
 

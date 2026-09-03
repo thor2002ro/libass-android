@@ -497,6 +497,8 @@ class AssHandler(
             Log.i("AssHandler", "Ass cacheSize: ${config.cacheSize}MB")
             Log.i("AssHandler", "Ass glyphSize: ${config.glyphSize}")
             render.setCacheLimit(config.glyphSize, config.cacheSize)
+            val activeThreads = render.setThreads(config.renderThreads)
+            Log.i("AssHandler", "Ass render threads: $activeThreads")
         }
         renderCallback?.invoke(render)
     }

@@ -1,0 +1,3189 @@
+diff --git a/configure.ac b/configure.ac
+index 50085c4..543ec38 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -13,10 +13,10 @@ AM_PROG_CC_C_O
+ AM_PROG_AS
+ 
+ # Checks for header files.
+-AC_CHECK_HEADERS_ONCE([iconv.h])
++AC_CHECK_HEADERS_ONCE([iconv.h sched.h stdatomic.h unistd.h windows.h])
+ 
+ # Checks for library functions.
+-AC_CHECK_FUNCS([strdup strndup strchrnul])
++AC_CHECK_FUNCS([sched_getaffinity strdup strndup strchrnul pthread_setname_np])
+ 
+ # Query configuration parameters and set their description
+ AC_ARG_ENABLE([test], AS_HELP_STRING([--enable-test],
+@@ -39,6 +39,10 @@ AC_ARG_ENABLE([require-system-font-provider], AS_HELP_STRING([--disable-require-
+     [allow compilation even if no system font provider was found @<:@default=enabled:>@]))
+ AC_ARG_ENABLE([asm], AS_HELP_STRING([--disable-asm],
+     [disable compiling with ASM @<:@default=check@:>@]))
++AC_ARG_ENABLE([pthreads], AS_HELP_STRING([--disable-pthreads],
++    [disable threading support via pthreads @<:@default=check@:>@]))
++AC_ARG_ENABLE([w32threads], AS_HELP_STRING([--disable-w32threads],
++    [disable threading support via win32 threads @<:@default=check@:>@]))
+ AC_ARG_ENABLE([large-tiles], AS_HELP_STRING([--enable-large-tiles],
+     [use larger tiles in the rasterizer (better performance, slightly worse quality) @<:@default=disabled@:>@]))
+ 
+@@ -62,6 +66,7 @@ AX_APPEND_COMPILE_FLAGS([ \
+     -Wno-missing-field-initializers \
+     dnl clang-specific, gcc currently has no fine-grained toggle for this, only -Wpedantic
+     -Wformat-non-iso -Werror=format-non-iso \
++    -Watomic-implicit-seq-cst \
+ ])
+ 
+ # Checks for available libraries and define corresponding C Macros
+@@ -91,6 +96,42 @@ AC_SEARCH_LIBS([lrint], [m], [
+ ])
+ pkg_libs="$LIBS"
+ 
++AS_IF([test "x$enable_pthreads" = xyes && test "x$enable_w32threads" = xyes], [
++    AC_MSG_ERROR([both pthreads and w32threads were requested.])
++])
++
++AS_IF([test "x$enable_pthreads" = xyes && test "x$ac_cv_header_stdatomic_h" != xyes], [
++    AC_MSG_ERROR([pthread support was requested, but <stdatomic.h> was not found.])
++])
++
++thread_api="none"
++
++AS_IF([test "x$enable_w32threads" != xno], [
++    AS_IF([test "x$ac_cv_header_windows_h" = xyes], [
++        AC_DEFINE(CONFIG_W32THREAD, 1, [Have Win32 threads])
++        thread_api=w32threads
++    ], [test "x$enable_w32threads" = xyes], [
++        AC_MSG_ERROR([win32 threading support was requested, but was not found.])
++    ])
++])
++
++AS_IF([test $thread_api == none && test "x$enable_pthreads" != xno && test "x$ac_cv_header_stdatomic_h" = xyes], [
++    AX_PTHREAD([
++        pkg_libs="$pkg_libs $PTHREAD_LIBS"
++        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
++        LIBS="$LIBS $PTHREAD_LIBS"
++        CC="$PTHREAD_CC"
++        AC_DEFINE(CONFIG_PTHREAD, 1, [Have POSIX threads])
++        thread_api=pthreads
++    ], [
++        AS_IF([test "x$enable_pthreads" = xyes], [
++            AC_MSG_ERROR([pthread support was requested, but was not found.])
++        ])
++    ])
++])
++
++AC_MSG_NOTICE([Chosen threading model: $thread_api])
++
+ ## Check for libraries via pkg-config and add to pkg_requires as needed
+ PKG_CHECK_MODULES([FREETYPE], [freetype2 >= 9.17.3], [
+     pkg_requires="freetype2 >= 9.17.3"
+@@ -98,8 +139,8 @@ PKG_CHECK_MODULES([FREETYPE], [freetype2 >= 9.17.3], [
+     LIBS="$LIBS $FREETYPE_LIBS"
+ ])
+ 
+-PKG_CHECK_MODULES([FRIBIDI], [fribidi >= 0.19.1], [
+-    pkg_requires="fribidi >= 0.19.1, ${pkg_requires}"
++PKG_CHECK_MODULES([FRIBIDI], [fribidi >= 0.19.7], [
++    pkg_requires="fribidi >= 0.19.7, ${pkg_requires}"
+     CFLAGS="$CFLAGS $FRIBIDI_CFLAGS"
+     LIBS="$LIBS $FRIBIDI_LIBS"
+ ])
+@@ -196,9 +237,7 @@ AS_IF([test "x$enable_coretext" != xno], [
+ AS_IF([test "x$enable_directwrite" != xno], [
+     # Linking to DirectWrite directly only works from Windows
+     AC_MSG_CHECKING([for DirectWrite])
+-    AC_COMPILE_IFELSE([
+-        AC_LANG_PROGRAM([[#include <windows.h>]], [[;]])
+-    ], [
++    AS_IF([test "x$ac_cv_header_windows_h" = xyes], [
+         directwrite=true
+         AC_MSG_RESULT([yes])
+         AC_MSG_CHECKING([for Win32 desktop APIs])
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index 6296863..e1ee021 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -9,7 +9,7 @@ noinst_LTLIBRARIES += libass/libass_internal.la
+ libass_libass_internal_la_SOURCES = \
+     libass/ass_utils.h libass/ass_utils.c \
+     libass/ass_string.h libass/ass_string.c \
+-    libass/ass_compat.h libass/ass_strtod.c \
++    libass/ass_compat.h  libass/ass_threading.h libass/ass_strtod.c \
+     libass/ass_filesystem.h libass/ass_filesystem.c \
+     libass/ass_types.h libass/ass.h libass/ass_priv.h libass/ass.c \
+     libass/ass_library.h libass/ass_library.c \
+diff --git a/libass/ass.h b/libass/ass.h
+index a1b546b..c993192 100644
+--- a/libass/ass.h
++++ b/libass/ass.h
+@@ -24,7 +24,7 @@
+ #include <stdarg.h>
+ #include "ass_types.h"
+ 
+-#define LIBASS_VERSION 0x01705000
++#define LIBASS_VERSION 0x01705010
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -400,6 +400,20 @@ void ass_renderer_done(ASS_Renderer *priv);
+  */
+ void ass_set_frame_size(ASS_Renderer *priv, int w, int h);
+ 
++/**
++ * \brief Set the number of threads to use during rendering. Default is 0,
++ * meaning the number of available logical cores if known, otherwise 1.
++ * \param priv renderer handle
++ * \param threads number of threads
++ *
++ * \return number of threads that will be used (if 0 is passed, the autodetected
++ * count will be returned), or 0 if libass was built without threading support.
++ *
++ * Calling this function requires the log callback of the associated ASS_Library
++ * to be thread-safe, and opts out of internal locking around log calls.
++ */
++unsigned ass_set_threads(ASS_Renderer *priv, unsigned threads);
++
+ /**
+  * \brief Set the source image size in pixels.
+  * This affects some ASS tags like e.g. 3D transforms and
+diff --git a/libass/ass_cache.c b/libass/ass_cache.c
+index 47069c1..999ea69 100644
+--- a/libass/ass_cache.c
++++ b/libass/ass_cache.c
+@@ -23,12 +23,12 @@
+ #include <inttypes.h>
+ #include <ft2build.h>
+ #include FT_OUTLINE_H
+-#include <assert.h>
+ 
+ #include "ass_utils.h"
+ #include "ass_font.h"
+ #include "ass_outline.h"
+ #include "ass_cache.h"
++#include "ass_threading.h"
+ 
+ // Always enable native-endian mode, since we don't care about cross-platform consistency of the hash
+ #define WYHASH_LITTLE_ENDIAN 1
+@@ -61,7 +61,13 @@ static bool font_key_move(void *dst, void *src)
+     return d->family.str;
+ }
+ 
+-static void font_destruct(void *key, void *value)
++static void font_key_destruct(void *k)
++{
++    ASS_FontDesc *key = k;
++    free((void *) key->family.str);
++}
++
++static void font_destruct(void *value)
+ {
+     ass_font_clear(value);
+ }
+@@ -72,8 +78,9 @@ const CacheDesc font_cache_desc = {
+     .hash_func = font_hash,
+     .compare_func = font_compare,
+     .key_move_func = font_key_move,
++    .key_destruct_func = font_key_destruct,
+     .construct_func = ass_font_construct,
+-    .destruct_func = font_destruct,
++    .value_destruct_func = font_destruct,
+     .key_size = sizeof(ASS_FontDesc),
+     .value_size = sizeof(ASS_Font)
+ };
+@@ -90,21 +97,26 @@ static bool bitmap_key_move(void *dst, void *src)
+     return true;
+ }
+ 
+-static void bitmap_destruct(void *key, void *value)
++static void bitmap_key_destruct(void *key)
+ {
+     BitmapHashKey *k = key;
+-    ass_free_bitmap(value);
+     ass_cache_dec_ref(k->outline);
+ }
+ 
++static void bitmap_destruct(void *value)
++{
++    ass_free_bitmap(value);
++}
++
+ size_t ass_bitmap_construct(void *key, void *value, void *priv);
+ 
+ const CacheDesc bitmap_cache_desc = {
+     .hash_func = bitmap_hash,
+     .compare_func = bitmap_compare,
+     .key_move_func = bitmap_key_move,
++    .key_destruct_func = bitmap_key_destruct,
+     .construct_func = ass_bitmap_construct,
+-    .destruct_func = bitmap_destruct,
++    .value_destruct_func = bitmap_destruct,
+     .key_size = sizeof(BitmapHashKey),
+     .value_size = sizeof(Bitmap)
+ };
+@@ -150,13 +162,9 @@ static bool composite_key_move(void *dst, void *src)
+     return true;
+ }
+ 
+-static void composite_destruct(void *key, void *value)
++static void composite_key_destruct(void *key)
+ {
+-    CompositeHashValue *v = value;
+     CompositeHashKey *k = key;
+-    ass_free_bitmap(&v->bm);
+-    ass_free_bitmap(&v->bm_o);
+-    ass_free_bitmap(&v->bm_s);
+     for (size_t i = 0; i < k->bitmap_count; i++) {
+         ass_cache_dec_ref(k->bitmaps[i].bm);
+         ass_cache_dec_ref(k->bitmaps[i].bm_o);
+@@ -164,14 +172,23 @@ static void composite_destruct(void *key, void *value)
+     free(k->bitmaps);
+ }
+ 
++static void composite_destruct(void *value)
++{
++    CompositeHashValue *v = value;
++    ass_free_bitmap(&v->bm);
++    ass_free_bitmap(&v->bm_o);
++    ass_free_bitmap(&v->bm_s);
++}
++
+ size_t ass_composite_construct(void *key, void *value, void *priv);
+ 
+ const CacheDesc composite_cache_desc = {
+     .hash_func = composite_hash,
+     .compare_func = composite_compare,
+     .key_move_func = composite_key_move,
++    .key_destruct_func = composite_key_destruct,
+     .construct_func = ass_composite_construct,
+-    .destruct_func = composite_destruct,
++    .value_destruct_func = composite_destruct,
+     .key_size = sizeof(CompositeHashKey),
+     .value_size = sizeof(CompositeHashValue)
+ };
+@@ -229,12 +246,9 @@ static bool outline_key_move(void *dst, void *src)
+     return true;
+ }
+ 
+-static void outline_destruct(void *key, void *value)
++static void outline_key_destruct(void *key)
+ {
+-    OutlineHashValue *v = value;
+     OutlineHashKey *k = key;
+-    ass_outline_free(&v->outline[0]);
+-    ass_outline_free(&v->outline[1]);
+     switch (k->type) {
+     case OUTLINE_GLYPH:
+         ass_cache_dec_ref(k->u.glyph.font);
+@@ -250,14 +264,22 @@ static void outline_destruct(void *key, void *value)
+     }
+ }
+ 
++static void outline_destruct(void *value)
++{
++    OutlineHashValue *v = value;
++    ass_outline_free(&v->outline[0]);
++    ass_outline_free(&v->outline[1]);
++}
++
+ size_t ass_outline_construct(void *key, void *value, void *priv);
+ 
+ const CacheDesc outline_cache_desc = {
+     .hash_func = outline_hash,
+     .compare_func = outline_compare,
+     .key_move_func = outline_key_move,
++    .key_destruct_func = outline_key_destruct,
+     .construct_func = ass_outline_construct,
+-    .destruct_func = outline_destruct,
++    .value_destruct_func = outline_destruct,
+     .key_size = sizeof(OutlineHashKey),
+     .value_size = sizeof(OutlineHashValue)
+ };
+@@ -275,7 +297,7 @@ static bool face_size_metrics_key_move(void *dst, void *src)
+     return true;
+ }
+ 
+-static void face_size_metrics_destruct(void *key, void *value)
++static void face_size_metrics_key_destruct(void *key)
+ {
+     FaceSizeMetricsHashKey *k = key;
+     ass_cache_dec_ref(k->font);
+@@ -287,8 +309,8 @@ const CacheDesc face_size_metrics_cache_desc = {
+     .hash_func = face_size_metrics_hash,
+     .compare_func = face_size_metrics_compare,
+     .key_move_func = face_size_metrics_key_move,
++    .key_destruct_func = face_size_metrics_key_destruct,
+     .construct_func = ass_face_size_metrics_construct,
+-    .destruct_func = face_size_metrics_destruct,
+     .key_size = sizeof(FaceSizeMetricsHashKey),
+     .value_size = sizeof(FT_Size_Metrics)
+ };
+@@ -306,7 +328,7 @@ static bool glyph_metrics_key_move(void *dst, void *src)
+     return true;
+ }
+ 
+-static void glyph_metrics_destruct(void *key, void *value)
++static void glyph_metrics_key_destruct(void *key)
+ {
+     GlyphMetricsHashKey *k = key;
+     ass_cache_dec_ref(k->font);
+@@ -318,8 +340,8 @@ const CacheDesc glyph_metrics_cache_desc = {
+     .hash_func = glyph_metrics_hash,
+     .compare_func = glyph_metrics_compare,
+     .key_move_func = glyph_metrics_key_move,
++    .key_destruct_func = glyph_metrics_key_destruct,
+     .construct_func = ass_glyph_metrics_construct,
+-    .destruct_func = glyph_metrics_destruct,
+     .key_size = sizeof(GlyphMetricsHashKey),
+     .value_size = sizeof(FT_Glyph_Metrics)
+ };
+@@ -330,19 +352,40 @@ const CacheDesc glyph_metrics_cache_desc = {
+ typedef struct cache_item {
+     Cache *cache;
+     const CacheDesc *desc;
+-    struct cache_item *next, **prev;
++    struct cache_item *_Atomic next, *_Atomic *prev;
+     struct cache_item *queue_next, **queue_prev;
+-    size_t size, ref_count;
++    struct cache_item *promote_next;
++    _Atomic AtomicInt size, ref_count;
++    ass_hashcode hash;
++
++    _Atomic AtomicInt last_used_frame;
++
++#if ENABLE_THREADS
++    struct cache_client *creating_client;
++#endif
+ } CacheItem;
+ 
+ struct cache {
+     unsigned buckets;
+-    CacheItem **map;
++    CacheItem *_Atomic *map;
+     CacheItem *queue_first, **queue_last;
+ 
+     const CacheDesc *desc;
+ 
+-    size_t cache_size;
++    _Atomic AtomicInt cache_size;
++
++    uintptr_t cur_frame;
++};
++
++struct cache_client {
++    CacheItem *promote_first;
++
++    struct cache_client *next;
++
++#if ENABLE_THREADS
++    pthread_mutex_t mutex;
++    pthread_cond_t cond;
++#endif
+ };
+ 
+ #define CACHE_ALIGN 8
+@@ -374,70 +417,211 @@ Cache *ass_cache_create(const CacheDesc *desc)
+         return NULL;
+     }
+ 
++#if ENABLE_THREADS
++    for (size_t i = 0; i < cache->buckets; i++)
++        atomic_init(&cache->map[i], NULL);
++
++    atomic_init(&cache->cache_size, 0);
++#endif
++
+     return cache;
+ }
+ 
++bool ass_cache_client_set_init(CacheClientSet *set)
++{
++    memset(set, 0, sizeof(*set));
++
++#if ENABLE_THREADS
++    if (pthread_mutex_init(&set->mutex, NULL) != 0)
++        return false;
++#endif
++
++    return true;
++}
++
++static void cache_client_done(CacheClient *client)
++{
++#if ENABLE_THREADS
++    pthread_mutex_destroy(&client->mutex);
++    pthread_cond_destroy(&client->cond);
++#endif
++
++    free(client);
++}
++
++void ass_cache_client_set_clear(CacheClientSet *set)
++{
++    CacheClient *client = set->first_client;
++
++    while (client) {
++        CacheClient *next = client->next;
++        cache_client_done(client);
++        client = next;
++    }
++
++    set->first_client = NULL;
++}
++
++void ass_cache_client_set_done(CacheClientSet *set)
++{
++    ass_cache_client_set_clear(set);
++
++#if ENABLE_THREADS
++    pthread_mutex_destroy(&set->mutex);
++#endif
++}
++
++CacheClient *ass_cache_client_create(CacheClientSet *set)
++{
++    CacheClient *client = calloc(1, sizeof(*client));
++    if (!client)
++        return NULL;
++
++#if ENABLE_THREADS
++    if (pthread_mutex_init(&client->mutex, NULL) != 0) {
++        free(client);
++        return NULL;
++    }
++
++    if (pthread_cond_init(&client->cond, NULL) != 0) {
++        pthread_cond_destroy(&client->cond);
++        free(client);
++        return NULL;
++    }
++
++    pthread_mutex_lock(&set->mutex);
++#endif
++
++    client->next = set->first_client;
++    set->first_client = client;
++
++#if ENABLE_THREADS
++    pthread_mutex_unlock(&set->mutex);
++#endif
++
++    return client;
++}
++
+ // Retrieve a value corresponding to a particular cache key,
+ // creating one if it does not already exist.
+ // The returned item is guaranteed to be valid until the next ass_cache_cut call;
+ // to extend its lifetime further, call ass_cache_inc_ref().
+-void *ass_cache_get(Cache *cache, void *key, void *priv)
++void *ass_cache_get(Cache *cache, CacheClient *client, void *key, void *priv)
+ {
+     const CacheDesc *desc = cache->desc;
+     size_t key_offs = CACHE_ITEM_SIZE + align_cache(desc->value_size);
+-    unsigned bucket = desc->hash_func(key, ASS_HASH_INIT) % cache->buckets;
+-    CacheItem *item = cache->map[bucket];
+-    while (item) {
+-        if (desc->compare_func(key, (char *) item + key_offs)) {
+-            assert(item->size);
+-            if (!item->queue_prev || item->queue_next) {
+-                if (item->queue_prev) {
+-                    item->queue_next->queue_prev = item->queue_prev;
+-                    *item->queue_prev = item->queue_next;
+-                } else
+-                    item->ref_count++;
+-                *cache->queue_last = item;
+-                item->queue_prev = cache->queue_last;
+-                cache->queue_last = &item->queue_next;
+-                item->queue_next = NULL;
++    ass_hashcode hash = desc->hash_func(key, ASS_HASH_INIT);
++    unsigned bucket = hash % cache->buckets;
++
++    CacheItem *_Atomic *bucketptr = &cache->map[bucket];
++    CacheItem *stop_at = NULL;
++    CacheItem *item, *new_item = NULL;
++    void *new_key = NULL;
++    CacheItem *start = atomic_load_explicit(bucketptr, memory_order_acquire);
++
++retry:
++    for (item = start; item && item != stop_at; item = atomic_load_explicit(&item->next, memory_order_acquire)) {
++        if (item->hash == hash && desc->compare_func(key, (char *)item + key_offs))
++            break;
++    }
++
++    if (item != NULL && item != stop_at) {
++        // Technically these could be consume operations, but no compiler implements those
++        if (atomic_load_explicit(&item->last_used_frame, memory_order_acquire) != cache->cur_frame) {
++            uintptr_t last_used = atomic_exchange_explicit(&item->last_used_frame, cache->cur_frame, memory_order_acquire);
++
++            if (last_used != cache->cur_frame) {
++                ass_assert1(!item->promote_next);
++                item->promote_next = client->promote_first;
++                client->promote_first = item;
+             }
++        }
++
++        if (!new_item)
+             desc->key_move_func(NULL, key);
++        else if (desc->key_destruct_func)
++            desc->key_destruct_func(key);
+ 
+-            return (char *) item + CACHE_ITEM_SIZE;
++#if ENABLE_THREADS
++        if (!atomic_load_explicit(&item->size, memory_order_acquire)) {
++            pthread_mutex_lock(&item->creating_client->mutex);
++
++            while (!atomic_load_explicit(&item->size, memory_order_relaxed))
++                pthread_cond_wait(&item->creating_client->cond, &item->creating_client->mutex);
++
++            pthread_mutex_unlock(&item->creating_client->mutex);
+         }
+-        item = item->next;
+-    }
+ 
+-    item = malloc(key_offs + desc->key_size);
+-    if (!item) {
+-        desc->key_move_func(NULL, key);
+-        return NULL;
++        free(new_item);
++#endif
++
++        return (char *) item + CACHE_ITEM_SIZE;
+     }
+-    item->cache = cache;
+-    item->desc = desc;
+-    void *new_key = (char *) item + key_offs;
+-    if (!desc->key_move_func(new_key, key)) {
+-        free(item);
+-        return NULL;
++
++    stop_at = start;
++
++    if (!new_item) {
++        // Risk of cache miss. Set up a new item to insert if we win the race.
++        new_item = malloc(key_offs + desc->key_size);
++        if (!new_item) {
++            desc->key_move_func(NULL, key);
++            return NULL;
++        }
++
++        new_key = (char *) new_item + key_offs;
++        if (!desc->key_move_func(new_key, key)) {
++            free(new_item);
++            return NULL;
++        }
++
++        key = new_key;
++
++        new_item->cache = cache;
++        new_item->desc = desc;
++        atomic_init(&new_item->size, 0);
++        new_item->hash = hash;
++        atomic_init(&new_item->last_used_frame, cache->cur_frame);
++        atomic_init(&new_item->ref_count, 1);
++        atomic_init(&new_item->next, NULL);
++        new_item->queue_next = NULL;
++        new_item->queue_prev = NULL;
++#if ENABLE_THREADS
++        new_item->creating_client = client;
++#endif
++        new_item->promote_next = client->promote_first;
+     }
++
++    atomic_store_explicit(&new_item->next, start, memory_order_release);
++    new_item->prev = bucketptr;
++
++    if (!atomic_compare_exchange_weak_explicit(bucketptr, &start, new_item, memory_order_acq_rel, memory_order_acquire))
++        goto retry;
++
++    // We won the race; finish inserting our new item
++    if (start)
++        start->prev = &new_item->next;
++
++    item = new_item;
++
++    client->promote_first = item;
++
+     void *value = (char *) item + CACHE_ITEM_SIZE;
+-    item->size = desc->construct_func(new_key, value, priv);
+-    assert(item->size);
+-
+-    CacheItem **bucketptr = &cache->map[bucket];
+-    if (*bucketptr)
+-        (*bucketptr)->prev = &item->next;
+-    item->prev = bucketptr;
+-    item->next = *bucketptr;
+-    *bucketptr = item;
+-
+-    *cache->queue_last = item;
+-    item->queue_prev = cache->queue_last;
+-    cache->queue_last = &item->queue_next;
+-    item->queue_next = NULL;
+-    item->ref_count = 1;
+-
+-    cache->cache_size += item->size + (item->size == 1 ? 0 : CACHE_ITEM_SIZE);
++    size_t size = desc->construct_func(new_key, value, priv);
++    ass_assert1(size);
++
++    atomic_fetch_add_explicit(&cache->cache_size, size + (size == 1 ? 0 : CACHE_ITEM_SIZE), memory_order_relaxed);
++
++#if ENABLE_THREADS
++    pthread_mutex_lock(&client->mutex);
++#endif
++
++    atomic_store_explicit(&item->size, size, memory_order_release);
++
++#if ENABLE_THREADS
++    pthread_mutex_unlock(&client->mutex);
++    pthread_cond_broadcast(&client->cond);
++#endif
++
+     return value;
+ }
+ 
+@@ -449,9 +633,13 @@ void *ass_cache_key(void *value)
+ 
+ static inline void destroy_item(const CacheDesc *desc, CacheItem *item)
+ {
+-    assert(item->desc == desc);
++    ass_assert1(item->desc == desc);
++    ass_assert2(!atomic_load_explicit(&item->next, memory_order_acquire) && !item->prev);
+     char *value = (char *) item + CACHE_ITEM_SIZE;
+-    desc->destruct_func(value + align_cache(desc->value_size), value);
++    if (desc->key_destruct_func)
++        desc->key_destruct_func(value + align_cache(desc->value_size));
++    if (desc->value_destruct_func)
++        desc->value_destruct_func(value);
+     free(item);
+ }
+ 
+@@ -460,8 +648,17 @@ void ass_cache_inc_ref(void *value)
+     if (!value)
+         return;
+     CacheItem *item = value_to_item(value);
+-    assert(item->size && item->ref_count);
+-    item->ref_count++;
++    ass_assert2(atomic_load_explicit(&item->size, memory_order_acquire));
++    ass_assert2(atomic_load_explicit(&item->ref_count, memory_order_acquire));
++    inc_ref(&item->ref_count);
++}
++
++static void dec_ref_item(CacheItem *item)
++{
++    ass_assert2(atomic_load_explicit(&item->size, memory_order_acquire));
++    ass_assert2(atomic_load_explicit(&item->ref_count, memory_order_acquire));
++    if (dec_ref(&item->ref_count) == 0)
++        destroy_item(item->desc, item);
+ }
+ 
+ void ass_cache_dec_ref(void *value)
+@@ -469,72 +666,118 @@ void ass_cache_dec_ref(void *value)
+     if (!value)
+         return;
+     CacheItem *item = value_to_item(value);
+-    assert(item->size && item->ref_count);
+-    if (--item->ref_count)
+-        return;
++    dec_ref_item(item);
++}
+ 
+-    Cache *cache = item->cache;
+-    if (cache) {
+-        if (item->next)
+-            item->next->prev = item->prev;
+-        *item->prev = item->next;
++void ass_cache_promote(CacheClientSet *set)
++{
++    for (CacheClient *client = set->first_client; client; client = client->next) {
++        while (client->promote_first) {
++            CacheItem *item = client->promote_first;
++            ass_assert2(item->prev);
++            ass_assert2(item->queue_prev || !item->queue_next);
++            ass_assert2(item->cache->queue_last);
++            ass_assert2(item->queue_next != item);
++            ass_assert2(item->queue_prev != &item->queue_next);
++
++            // Skip if we're already at the end of the queue
++            if (!item->queue_prev || item->queue_next) {
++                if (item->queue_prev)
++                    *item->queue_prev = item->queue_next;
++                if (item->queue_next)
++                    item->queue_next->queue_prev = item->queue_prev;
++                item->queue_next = NULL;
++
++                item->queue_prev = item->cache->queue_last;
++                *item->cache->queue_last = item;
++                item->cache->queue_last = &item->queue_next;
++
++                ass_assert2(item->queue_prev != &item->queue_next);
++            }
+ 
+-        cache->cache_size -= item->size + (item->size == 1 ? 0 : CACHE_ITEM_SIZE);
++            client->promote_first = item->promote_next;
++            item->promote_next = NULL;
++        }
+     }
+-    destroy_item(item->desc, item);
+ }
+ 
+ void ass_cache_cut(Cache *cache, size_t max_size)
+ {
+-    if (cache->cache_size <= max_size)
+-        return;
++    ass_assert1(cache->queue_last);
+ 
+-    do {
++    while (atomic_load_explicit(&cache->cache_size, memory_order_relaxed) > max_size && cache->queue_first) {
+         CacheItem *item = cache->queue_first;
+-        if (!item)
++        ass_assert2(item->prev);
++        ass_assert2(atomic_load_explicit(&item->size, memory_order_acquire));
++        ass_assert2(item->queue_prev == &cache->queue_first);
++        ass_assert2(item->queue_next != item);
++        ass_assert2(item->queue_prev != &item->queue_next);
++        ass_assert2(!item->promote_next);
++
++        if (atomic_load_explicit(&item->last_used_frame, memory_order_relaxed) == cache->cur_frame) {
++            // everything after this must have been last used this frame
+             break;
+-        assert(item->size);
++        }
+ 
+-        cache->queue_first = item->queue_next;
+-        if (--item->ref_count) {
+-            item->queue_prev = NULL;
+-            continue;
++        if (item->queue_next) {
++            ass_assert2(item->queue_next->queue_prev != &item->queue_next->queue_next);
++            item->queue_next->queue_prev = &cache->queue_first;
++        } else {
++            cache->queue_last = &cache->queue_first;
+         }
+ 
+-        if (item->next)
+-            item->next->prev = item->prev;
+-        *item->prev = item->next;
++        cache->queue_first = item->queue_next;
++
++        CacheItem *item_next = atomic_load_explicit(&item->next, memory_order_relaxed);
++        if (item_next)
++            item_next->prev = item->prev;
++        atomic_store_explicit(item->prev, item_next, memory_order_relaxed);
++
++        atomic_store_explicit(&item->next, NULL, memory_order_relaxed);
++        item->prev = NULL;
++        item->queue_prev = NULL;
++        item->queue_next = NULL;
++
++        uintptr_t item_size = atomic_load_explicit(&item->size, memory_order_relaxed);
++        atomic_fetch_sub_explicit(&cache->cache_size, item_size + (item_size == 1 ? 0 : CACHE_ITEM_SIZE), memory_order_relaxed);
+ 
+-        cache->cache_size -= item->size + (item->size == 1 ? 0 : CACHE_ITEM_SIZE);
+-        destroy_item(cache->desc, item);
+-    } while (cache->cache_size > max_size);
+-    if (cache->queue_first)
+-        cache->queue_first->queue_prev = &cache->queue_first;
+-    else
+-        cache->queue_last = &cache->queue_first;
++        dec_ref_item(item);
++    }
++
++    cache->cur_frame++;
+ }
+ 
+ void ass_cache_empty(Cache *cache)
+ {
+     for (int i = 0; i < cache->buckets; i++) {
+-        CacheItem *item = cache->map[i];
++        CacheItem *item = atomic_load_explicit(&cache->map[i], memory_order_relaxed);
+         while (item) {
+-            assert(item->size);
+-            CacheItem *next = item->next;
+-            if (item->queue_prev)
+-                item->ref_count--;
+-            if (item->ref_count)
+-                item->cache = NULL;
+-            else
+-                destroy_item(cache->desc, item);
++            ass_assert2(item->queue_prev || !item->queue_next);
++            ass_assert2(item->prev);
++            ass_assert2(atomic_load_explicit(&item->size, memory_order_acquire));
++            CacheItem *next = atomic_load_explicit(&item->next, memory_order_relaxed);
++
++            atomic_store_explicit(&item->next, NULL, memory_order_relaxed);
++            item->prev = NULL;
++            item->queue_prev = NULL;
++            item->queue_next = NULL;
++            item->promote_next = NULL;
++
++            uintptr_t item_size = atomic_load_explicit(&item->size, memory_order_relaxed);
++            atomic_fetch_sub_explicit(&cache->cache_size, item_size + (item_size == 1 ? 0 : CACHE_ITEM_SIZE), memory_order_relaxed);
++
++            dec_ref_item(item);
++
+             item = next;
+         }
+-        cache->map[i] = NULL;
++        atomic_store_explicit(&cache->map[i], NULL, memory_order_release);
+     }
+ 
++    ass_assert2(!atomic_load_explicit(&cache->cache_size, memory_order_acquire));
++
+     cache->queue_first = NULL;
+     cache->queue_last = &cache->queue_first;
+-    cache->cache_size = 0;
++    atomic_store_explicit(&cache->cache_size, 0, memory_order_release);
+ }
+ 
+ void ass_cache_done(Cache *cache)
+diff --git a/libass/ass_cache.h b/libass/ass_cache.h
+index 53eac20..e90ece7 100644
+--- a/libass/ass_cache.h
++++ b/libass/ass_cache.h
+@@ -24,8 +24,10 @@
+ #include "ass_font.h"
+ #include "ass_outline.h"
+ #include "ass_bitmap.h"
++#include "ass_threading.h"
+ 
+ typedef struct cache Cache;
++typedef struct cache_client CacheClient;
+ typedef uint64_t ass_hashcode;
+ 
+ // cache values
+@@ -50,8 +52,9 @@ typedef struct {
+ typedef ass_hashcode (*HashFunction)(void *key, ass_hashcode hval);
+ typedef bool (*HashCompare)(void *a, void *b);
+ typedef bool (*CacheKeyMove)(void *dst, void *src);
+-typedef size_t (*CacheValueConstructor)(void *key, void *value, void *priv);
+-typedef void (*CacheItemDestructor)(void *key, void *value);
++typedef void (*CacheKeyDestruct)(void *key);
++typedef size_t (*CacheValueConstruct)(void *key, void *value, void *priv);
++typedef void (*CacheValueDestruct)(void *value);
+ 
+ // cache hash keys
+ 
+@@ -92,17 +95,32 @@ typedef struct
+     HashFunction hash_func;
+     HashCompare compare_func;
+     CacheKeyMove key_move_func;
+-    CacheValueConstructor construct_func;
+-    CacheItemDestructor destruct_func;
++    CacheValueConstruct construct_func;
++    CacheKeyDestruct key_destruct_func;
++    CacheValueDestruct value_destruct_func;
+     size_t key_size;
+     size_t value_size;
+ } CacheDesc;
+ 
++typedef struct
++{
++    struct cache_client *first_client;
++
++#if ENABLE_THREADS
++    pthread_mutex_t mutex;
++#endif
++} CacheClientSet;
++
+ Cache *ass_cache_create(const CacheDesc *desc);
+-void *ass_cache_get(Cache *cache, void *key, void *priv);
++bool ass_cache_client_set_init(CacheClientSet *set);
++void ass_cache_client_set_clear(CacheClientSet *set);
++void ass_cache_client_set_done(CacheClientSet *set);
++CacheClient *ass_cache_client_create(CacheClientSet *set);
++void *ass_cache_get(Cache *cache, CacheClient *client, void *key, void *priv);
+ void *ass_cache_key(void *value);
+ void ass_cache_inc_ref(void *value);
+ void ass_cache_dec_ref(void *value);
++void ass_cache_promote(CacheClientSet *set);
+ void ass_cache_cut(Cache *cache, size_t max_size);
+ void ass_cache_empty(Cache *cache);
+ void ass_cache_done(Cache *cache);
+diff --git a/libass/ass_font.c b/libass/ass_font.c
+index 0b3070a..89255ed 100644
+--- a/libass/ass_font.c
++++ b/libass/ass_font.c
+@@ -505,20 +505,25 @@ static int add_face(ASS_FontSelector *fontsel, ASS_Font *font, uint32_t ch)
+     FT_Face face;
+     int ret = -1;
+ 
+-    if (font->n_faces == ASS_FONT_MAX_FACES)
+-        return -1;
++    ass_fontselect_lock(fontsel);
++
++    AtomicInt n_faces = atomic_load_explicit(&font->n_faces, memory_order_acquire);
++
++    if (n_faces == ASS_FONT_MAX_FACES)
++        goto cleanup;
+ 
+     path = ass_font_select(fontsel, font, &index,
+             &postscript_name, &uid, &stream, ch);
+ 
+     if (!path)
+-        return -1;
++        goto cleanup;
+ 
+-    for (i = 0; i < font->n_faces; i++) {
++    for (i = 0; i < n_faces; i++) {
+         if (font->faces_uid[i] == uid) {
+             ass_msg(font->library, MSGL_INFO,
+                     "Got a font face that already is available! Skipping.");
+-            return i;
++            ret = i;
++            goto cleanup;
+         }
+     }
+ 
+@@ -531,30 +536,33 @@ static int add_face(ASS_FontSelector *fontsel, ASS_Font *font, uint32_t ch)
+     }
+ 
+     if (!face)
+-        return -1;
++        goto cleanup;
+ 
+     ass_charmap_magic(font->library, face);
+     set_font_metrics(face);
+ 
+-    font->faces[font->n_faces] = face;
+-    font->faces_uid[font->n_faces] = uid;
+-    if (!ass_create_hb_font(font, font->n_faces)) {
++    font->faces[n_faces] = face;
++    font->faces_uid[n_faces] = uid;
++    if (!ass_create_hb_font(font, n_faces)) {
+         FT_Done_Face(face);
+-        goto fail;
++        goto cleanup;
+     }
+ 
+-    ret = font->n_faces++;
++    atomic_store_explicit(&font->n_faces, n_faces + 1, memory_order_release);
++    ret = n_faces;
++
++cleanup:
++    ass_fontselect_unlock(fontsel);
+ 
+-fail:
+     return ret;
+ }
+ 
+ /**
+  * \brief Create a new ASS_Font according to "desc" argument
+  */
+-ASS_Font *ass_font_new(ASS_Renderer *render_priv, ASS_FontDesc *desc)
++ASS_Font *ass_font_new(struct render_context *context, ASS_FontDesc *desc)
+ {
+-    ASS_Font *font = ass_cache_get(render_priv->cache.font_cache, desc, render_priv);
++    ASS_Font *font = ass_cache_get(context->renderer->cache.font_cache, context->cache_client, desc, context->renderer);
+     if (!font)
+         return NULL;
+     if (font->library)
+@@ -568,17 +576,27 @@ size_t ass_font_construct(void *key, void *value, void *priv)
+     ASS_FontDesc *desc = key;
+     ASS_Font *font = value;
+ 
+-    font->library = render_priv->library;
+     font->ftlibrary = render_priv->ftlibrary;
+-    font->n_faces = 0;
++    atomic_init(&font->n_faces, 0);
+     font->desc.family = desc->family;
+     font->desc.bold = desc->bold;
+     font->desc.italic = desc->italic;
+     font->desc.vertical = desc->vertical;
+ 
++#if ENABLE_THREADS
++    if (pthread_mutex_init(&font->mutex, NULL) != 0)
++        return 1;
++#endif
++
++    font->library = render_priv->library;
++
+     int error = add_face(render_priv->fontselect, font, 0);
+-    if (error == -1)
++    if (error == -1) {
+         font->library = NULL;
++#if ENABLE_THREADS
++        pthread_mutex_destroy(&font->mutex);
++#endif
++    }
+     return 1;
+ }
+ 
+@@ -704,6 +722,7 @@ static void ass_glyph_italicize(FT_Face face)
+  * \brief Get glyph and face index
+  * Finds a face that has the requested codepoint and returns both face
+  * and glyph index.
++ * Must be called under lock.
+  */
+ int ass_font_get_index(ASS_FontSelector *fontsel, ASS_Font *font,
+                        uint32_t symbol, int *face_index, int *glyph_index)
+@@ -718,12 +737,15 @@ int ass_font_get_index(ASS_FontSelector *fontsel, ASS_Font *font,
+         *face_index = 0;
+         return 0;
+     }
+-    if (font->n_faces == 0) {
++
++    AtomicInt n_faces = atomic_load_explicit(&font->n_faces, memory_order_acquire);
++
++    if (n_faces == 0) {
+         *face_index = 0;
+         return 0;
+     }
+ 
+-    for (i = 0; i < font->n_faces && index == 0; ++i) {
++    for (i = 0; i < n_faces && index == 0; ++i) {
+         face = font->faces[i];
+         index = ass_font_index_magic(face, symbol);
+         if (index)
+@@ -818,13 +840,27 @@ bool ass_font_get_glyph(ASS_Font *font, int face_index, int index,
+ void ass_font_clear(ASS_Font *font)
+ {
+     int i;
+-    for (i = 0; i < font->n_faces; ++i) {
++    AtomicInt n_faces = atomic_load_explicit(&font->n_faces, memory_order_relaxed);
++    for (i = 0; i < n_faces; ++i) {
+         if (font->faces[i])
+             FT_Done_Face(font->faces[i]);
+         if (font->hb_fonts[i])
+             hb_font_destroy(font->hb_fonts[i]);
+     }
+-    free((char *) font->desc.family.str);
++
++#if ENABLE_THREADS
++    pthread_mutex_destroy(&font->mutex);
++#endif
++}
++
++void ass_font_lock(ASS_Font *font)
++{
++    pthread_mutex_lock(&font->mutex);
++}
++
++void ass_font_unlock(ASS_Font *font)
++{
++    pthread_mutex_unlock(&font->mutex);
+ }
+ 
+ /**
+diff --git a/libass/ass_font.h b/libass/ass_font.h
+index 2388249..6fc0ae8 100644
+--- a/libass/ass_font.h
++++ b/libass/ass_font.h
+@@ -31,6 +31,7 @@ typedef struct ass_font ASS_Font;
+ #include "ass_cache.h"
+ #include "ass_outline.h"
+ #include "ass_arabic_charmap.h"
++#include "ass_threading.h"
+ 
+ #define VERTICAL_LOWER_BOUND 0x02f1
+ 
+@@ -46,11 +47,15 @@ struct ass_font {
+     int faces_uid[ASS_FONT_MAX_FACES];
+     FT_Face faces[ASS_FONT_MAX_FACES];
+     struct hb_font_t *hb_fonts[ASS_FONT_MAX_FACES];
+-    int n_faces;
++    _Atomic AtomicInt n_faces;
++
++#if ENABLE_THREADS
++    pthread_mutex_t mutex;
++#endif
+ };
+ 
+ void ass_charmap_magic(ASS_Library *library, FT_Face face);
+-ASS_Font *ass_font_new(ASS_Renderer *render_priv, ASS_FontDesc *desc);
++ASS_Font *ass_font_new(struct render_context *context, ASS_FontDesc *desc);
+ void ass_face_set_size(FT_Face face, double size);
+ int ass_face_get_weight(FT_Face face);
+ FT_Long ass_face_get_style_flags(FT_Face face);
+@@ -64,6 +69,9 @@ bool ass_font_get_glyph(ASS_Font *font, int face_index, int index,
+                         ASS_Hinting hinting);
+ void ass_font_clear(ASS_Font *font);
+ 
++void ass_font_lock(ASS_Font *font);
++void ass_font_unlock(ASS_Font *font);
++
+ bool ass_get_glyph_outline(ASS_Outline *outline, int32_t *advance,
+                            FT_Face face, unsigned flags);
+ 
+diff --git a/libass/ass_fontselect.c b/libass/ass_fontselect.c
+index 2303876..57f6c49 100644
+--- a/libass/ass_fontselect.c
++++ b/libass/ass_fontselect.c
+@@ -101,6 +101,10 @@ struct font_selector {
+ 
+     ASS_FontProvider *default_provider;
+     ASS_FontProvider *embedded_provider;
++
++#if ENABLE_THREADS
++    pthread_mutex_t mutex;
++#endif
+ };
+ 
+ struct font_provider {
+@@ -1114,6 +1118,11 @@ ass_fontselect_init(ASS_Library *library, FT_Library ftlibrary, size_t *num_emfo
+ 
+     }
+ 
++#if ENABLE_THREADS
++    if (pthread_mutex_init(&priv->mutex, NULL) != 0)
++        goto fail;
++#endif
++
+     return priv;
+ 
+ fail:
+@@ -1169,9 +1178,23 @@ void ass_fontselect_free(ASS_FontSelector *priv)
+     free(priv->path_default);
+     free(priv->family_default);
+ 
++#if ENABLE_THREADS
++    pthread_mutex_destroy(&priv->mutex);
++#endif
++
+     free(priv);
+ }
+ 
++void ass_fontselect_lock(ASS_FontSelector *priv)
++{
++    pthread_mutex_lock(&priv->mutex);
++}
++
++void ass_fontselect_unlock(ASS_FontSelector *priv)
++{
++    pthread_mutex_unlock(&priv->mutex);
++}
++
+ void ass_map_font(const ASS_FontMapping *map, int len, const char *name,
+                   ASS_FontProviderMetaData *meta)
+ {
+diff --git a/libass/ass_fontselect.h b/libass/ass_fontselect.h
+index 9cd8cfe..ae354d0 100644
+--- a/libass/ass_fontselect.h
++++ b/libass/ass_fontselect.h
+@@ -253,6 +253,9 @@ char *ass_font_select(ASS_FontSelector *priv,
+                       int *uid, ASS_FontStream *data, uint32_t code);
+ void ass_fontselect_free(ASS_FontSelector *priv);
+ 
++void ass_fontselect_lock(ASS_FontSelector *priv);
++void ass_fontselect_unlock(ASS_FontSelector *priv);
++
+ // Font provider functions
+ ASS_FontProvider *ass_font_provider_new(ASS_FontSelector *selector,
+         ASS_FontProviderFuncs *funcs, void *data);
+diff --git a/libass/ass_library.c b/libass/ass_library.c
+index a27aada..d4b61a8 100644
+--- a/libass/ass_library.c
++++ b/libass/ass_library.c
+@@ -45,8 +45,16 @@ static void ass_msg_handler(int level, const char *fmt, va_list va, void *data)
+ ASS_Library *ass_library_init(void)
+ {
+     ASS_Library* lib = calloc(1, sizeof(*lib));
+-    if (lib)
++    if (lib) {
+         lib->msg_callback = ass_msg_handler;
++#if ENABLE_THREADS
++        lib->thread_safe_cb = -1;
++        if (pthread_mutex_init(&lib->log_mutex, NULL) != 0) {
++            free(lib);
++            lib = NULL;
++        }
++#endif
++    }
+     #ifdef CONFIG_UNIBREAK
+     // libunibreak works without, but its docs suggest this improves performance
+     init_linebreak();
+@@ -60,6 +68,9 @@ void ass_library_done(ASS_Library *priv)
+         ass_set_fonts_dir(priv, NULL);
+         ass_set_style_overrides(priv, NULL);
+         ass_clear_fonts(priv);
++#if ENABLE_THREADS
++        pthread_mutex_destroy(&priv->log_mutex);
++#endif
+         free(priv);
+     }
+ }
+@@ -156,6 +167,10 @@ void ass_set_message_cb(ASS_Library *priv,
+     if (msg_cb) {
+         priv->msg_callback = msg_cb;
+         priv->msg_callback_data = data;
++#if ENABLE_THREADS
++        if (priv->thread_safe_cb == -1)
++            priv->thread_safe_cb = 0;
++#endif
+     }
+ }
+ 
+diff --git a/libass/ass_library.h b/libass/ass_library.h
+index 0a97960..9bcc671 100644
+--- a/libass/ass_library.h
++++ b/libass/ass_library.h
+@@ -22,6 +22,7 @@
+ #include <stdarg.h>
+ 
+ #include "ass_filesystem.h"
++#include "ass_threading.h"
+ 
+ typedef struct {
+     char *name;
+@@ -38,6 +39,11 @@ struct ass_library {
+     size_t num_fontdata;
+     void (*msg_callback)(int, const char *, va_list, void *);
+     void *msg_callback_data;
++
++#if ENABLE_THREADS
++    pthread_mutex_t log_mutex;
++    int thread_safe_cb;
++#endif
+ };
+ 
+ char *ass_load_file(struct ass_library *library, const char *fname, FileNameSource hint, size_t *bufsize);
+diff --git a/libass/ass_parse.c b/libass/ass_parse.c
+index 99833c5..b74c6b8 100644
+--- a/libass/ass_parse.c
++++ b/libass/ass_parse.c
+@@ -111,7 +111,7 @@ void ass_update_font(RenderContext *state)
+         val = 0;                // normal
+     desc.italic = val;
+ 
+-    state->font = ass_font_new(state->renderer, &desc);
++    state->font = ass_font_new(state, &desc);
+ }
+ 
+ /**
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index b2a77ed..ed504c6 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -28,6 +28,11 @@
+ #include <linebreak.h>
+ #endif
+ 
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#endif
++
+ #include "ass.h"
+ #include "ass_outline.h"
+ #include "ass_render.h"
+@@ -82,7 +87,11 @@ static bool render_context_init(RenderContext *state, ASS_Renderer *priv)
+     if (!text_info_init(&state->text_info))
+         return false;
+ 
+-    if (!(state->shaper = ass_shaper_new(priv->cache.metrics_cache, priv->cache.face_size_metrics_cache)))
++    state->cache_client = ass_cache_client_create(&priv->cache.client_set);
++    if (!state->cache_client)
++        return false;
++
++    if (!(state->shaper = ass_shaper_new(priv->cache.metrics_cache, priv->cache.face_size_metrics_cache, state->cache_client)))
+         return false;
+ 
+     return ass_rasterizer_init(&priv->engine, &state->rasterizer, RASTERIZER_PRECISION);
+@@ -145,9 +154,15 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
+         !priv->cache.face_size_metrics_cache || !priv->cache.metrics_cache)
+         goto fail;
+ 
+-    priv->cache.glyph_max = GLYPH_CACHE_MAX;
+-    priv->cache.bitmap_max_size = BITMAP_CACHE_MAX_SIZE;
+-    priv->cache.composite_max_size = COMPOSITE_CACHE_MAX_SIZE;
++    if (!ass_cache_client_set_init(&priv->cache.client_set))
++        goto fail;
++
++    const char *glyph_str = getenv("LIBASS_GLYPH_CACHE_MAX");
++    const char *bitmap_str = getenv("LIBASS_BITMAP_CACHE_MAX");
++    int glyph_size = glyph_str ? atoi(glyph_str) : 0;
++    int bitmap_size = bitmap_str ? atoi(bitmap_str) : 0;
++
++    ass_set_cache_limits(priv, glyph_size, bitmap_size);
+ 
+     if (!render_context_init(&priv->state, priv))
+         goto fail;
+@@ -160,6 +175,35 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
+     ass_shaper_info(library);
+     priv->settings.shaper = ASS_SHAPING_COMPLEX;
+ 
++#if ENABLE_THREADS
++    priv->settings.threads = default_threads();
++
++    if (pthread_mutex_init(&priv->mutex, NULL) != 0)
++        goto thread_fail;
++
++    priv->mutex_inited = true;
++
++    if (pthread_cond_init(&priv->main_cond, NULL) != 0)
++        goto thread_fail;
++
++    priv->main_cond_inited = true;
++
++    if (pthread_cond_init(&priv->pool_cond, NULL) != 0)
++        goto thread_fail;
++
++    priv->pool_cond_inited = true;
++
++    atomic_init(&priv->processing_eimgs, 0);
++    atomic_init(&priv->sent_eimgs, 0);
++    atomic_init(&priv->next_eimg, 0);
++
++thread_fail:
++    if (!priv->pool_cond_inited) {
++        ass_msg(library, MSGL_WARN, "Failed to initialize threading functionality; disabling");
++        priv->thread_start_failed = 1;
++    }
++#endif
++
+     ass_msg(library, MSGL_V, "Initialized");
+ 
+     return priv;
+@@ -171,20 +215,54 @@ fail:
+     return NULL;
+ }
+ 
++#if ENABLE_THREADS
++static void join_threads(ASS_Renderer *render_priv)
++{
++    if (render_priv->threads) {
++        pthread_mutex_lock(&render_priv->mutex);
++        render_priv->shutting_down = 1;
++        pthread_mutex_unlock(&render_priv->mutex);
++        pthread_cond_broadcast(&render_priv->pool_cond);
++
++        for (unsigned i = 0; i < render_priv->n_threads; i++)
++            pthread_join(render_priv->threads[i], NULL);
++
++        free(render_priv->threads);
++
++        render_priv->threads = NULL;
++        render_priv->n_threads = 0;
++    }
++}
++#endif
++
+ void ass_renderer_done(ASS_Renderer *render_priv)
+ {
+     if (!render_priv)
+         return;
+ 
++#if ENABLE_THREADS
++    join_threads(render_priv);
++
++    if (render_priv->mutex_inited)
++        pthread_mutex_destroy(&render_priv->mutex);
++    if (render_priv->main_cond_inited)
++        pthread_cond_destroy(&render_priv->main_cond);
++    if (render_priv->pool_cond_inited)
++        pthread_cond_destroy(&render_priv->pool_cond);
++#endif
++
+     ass_frame_unref(render_priv->images_root);
+     ass_frame_unref(render_priv->prev_images_root);
+ 
++    render_context_done(&render_priv->state);
++
+     ass_cache_done(render_priv->cache.composite_cache);
+     ass_cache_done(render_priv->cache.bitmap_cache);
+     ass_cache_done(render_priv->cache.outline_cache);
+     ass_cache_done(render_priv->cache.face_size_metrics_cache);
+     ass_cache_done(render_priv->cache.metrics_cache);
+     ass_cache_done(render_priv->cache.font_cache);
++    ass_cache_client_set_done(&render_priv->cache.client_set);
+ 
+     if (render_priv->fontselect)
+         ass_fontselect_free(render_priv->fontselect);
+@@ -192,8 +270,6 @@ void ass_renderer_done(ASS_Renderer *render_priv)
+         FT_Done_FreeType(render_priv->ftlibrary);
+     free(render_priv->eimg);
+ 
+-    render_context_done(&render_priv->state);
+-
+     free(render_priv->settings.default_font);
+     free(render_priv->settings.default_family);
+ 
+@@ -897,12 +973,12 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
+ 
+     ASS_Vector pos;
+     BitmapHashKey key;
+-    key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
++    key.outline = ass_cache_get(render_priv->cache.outline_cache, state->cache_client, &ol_key, render_priv);
+     if (!key.outline || !key.outline->valid ||
+             !quantize_transform(m, &pos, NULL, true, &clip, &key))
+         return;
+ 
+-    Bitmap *clip_bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
++    Bitmap *clip_bm = ass_cache_get(render_priv->cache.bitmap_cache, state->cache_client, &key, state);
+     if (!clip_bm)
+         return;
+ 
+@@ -1361,7 +1437,7 @@ get_outline_glyph(RenderContext *state, GlyphInfo *info)
+     if (info->drawing_text.str) {
+         key.type = OUTLINE_DRAWING;
+         key.u.drawing.text = info->drawing_text;
+-        val = ass_cache_get(priv->cache.outline_cache, &key, priv);
++        val = ass_cache_get(priv->cache.outline_cache, state->cache_client, &key, priv);
+         if (!val || !val->valid)
+             return;
+ 
+@@ -1384,7 +1460,7 @@ get_outline_glyph(RenderContext *state, GlyphInfo *info)
+         k->italic = info->italic;
+         k->flags = info->flags;
+ 
+-        val = ass_cache_get(priv->cache.outline_cache, &key, priv);
++        val = ass_cache_get(priv->cache.outline_cache, state->cache_client, &key, priv);
+         if (!val || !val->valid)
+             return;
+ 
+@@ -1422,16 +1498,22 @@ size_t ass_outline_construct(void *key, void *value, void *priv)
+     case OUTLINE_GLYPH:
+         {
+             GlyphHashKey *k = &outline_key->u.glyph;
++            ass_font_lock(k->font);
+             ass_face_set_size(k->font->faces[k->face_index], k->size);
+             if (!ass_font_get_glyph(k->font, k->face_index, k->glyph_index,
+-                                    render_priv->settings.hinting))
++                                    render_priv->settings.hinting)) {
++                ass_font_unlock(k->font);
+                 return 1;
++            }
+             if (!ass_get_glyph_outline(&v->outline[0], &v->advance,
+                                        k->font->faces[k->face_index],
+-                                       k->flags))
++                                       k->flags)) {
++                ass_font_unlock(k->font);
+                 return 1;
++            }
+             ass_font_get_asc_desc(k->font, k->face_index,
+                                   &v->asc, &v->desc);
++            ass_font_unlock(k->font);
+             break;
+         }
+     case OUTLINE_DRAWING:
+@@ -1643,7 +1725,7 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+     if (!quantize_transform(m, pos, offset, first, potentially_clipped ? &clip_rect : NULL, &key))
+         return;
+ 
+-    info->bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
++    info->bm = ass_cache_get(render_priv->cache.bitmap_cache, state->cache_client, &key, state);
+     if (!info->bm || !info->bm->buffer)
+         info->bm = NULL;
+ 
+@@ -1762,12 +1844,12 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+         }
+     }
+ 
+-    key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
++    key.outline = ass_cache_get(render_priv->cache.outline_cache, state->cache_client, &ol_key, render_priv);
+     if (!key.outline || !key.outline->valid ||
+             !quantize_transform(m, pos_o, offset, false, potentially_clipped ? &clip_rect : NULL, &key))
+         return;
+ 
+-    info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
++    info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, state->cache_client, &key, state);
+     if (!info->bm_o || !info->bm_o->buffer) {
+         info->bm_o = NULL;
+         *pos_o = *pos;
+@@ -2859,7 +2941,7 @@ static void render_and_combine_glyphs(RenderContext *state,
+         key.filter = info->filter;
+         key.bitmap_count = info->bitmap_count;
+         key.bitmaps = info->bitmaps;
+-        CompositeHashValue *val = ass_cache_get(render_priv->cache.composite_cache, &key, render_priv);
++        CompositeHashValue *val = ass_cache_get(render_priv->cache.composite_cache, state->cache_client, &key, render_priv);
+         if (!val)
+             continue;
+ 
+@@ -3055,6 +3137,21 @@ static void add_background(RenderContext *state, EventImages *event_images)
+     }
+ }
+ 
++static void setup_shaper(ASS_Shaper *shaper, ASS_Renderer *render_priv)
++{
++    ASS_Track *track = render_priv->track;
++
++    ass_shaper_set_kerning(shaper, track->Kerning);
++    ass_shaper_set_language(shaper, track->Language);
++    ass_shaper_set_level(shaper, render_priv->settings.shaper);
++#ifdef USE_FRIBIDI_EX_API
++    ass_shaper_set_bidi_brackets(shaper,
++            track->parser_priv->feature_flags & FEATURE_MASK(ASS_FEATURE_BIDI_BRACKETS));
++#endif
++    ass_shaper_set_whole_text_layout(shaper,
++            track->parser_priv->feature_flags & FEATURE_MASK(ASS_FEATURE_WHOLE_TEXT_LAYOUT));
++}
++
+ /**
+  * \brief Main ass rendering function, glues everything together
+  * \param event event to render
+@@ -3062,9 +3159,10 @@ static void add_background(RenderContext *state, EventImages *event_images)
+  * Process event, appending resulting ASS_Image's to images_root.
+  */
+ static bool
+-ass_render_event(RenderContext *state, ASS_Event *event,
+-                 EventImages *event_images)
++ass_render_event(RenderContext *state, EventImages *event_images)
+ {
++    ASS_Event *event = event_images->event;
++
+     ASS_Renderer *render_priv = state->renderer;
+     if (event->Style >= render_priv->track->n_styles) {
+         ass_msg(render_priv->library, MSGL_WARN, "No style found");
+@@ -3075,6 +3173,8 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+         return false;
+     }
+ 
++    setup_shaper(state->shaper, render_priv);
++
+     free_render_context(state);
+     init_render_context(state, event);
+ 
+@@ -3261,7 +3361,6 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+ 
+     render_and_combine_glyphs(state, device_x, device_y);
+ 
+-    memset(event_images, 0, sizeof(*event_images));
+     // VSFilter does *not* shift lines with a border > margin to be within the
+     // frame, so negative values for top and left may occur
+     event_images->top = device_y - text_info->lines[0].asc - text_info->border_top;
+@@ -3274,7 +3373,6 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+         + 2 * text_info->border_x + 0.5;
+     event_images->detect_collisions = state->detect_collisions;
+     event_images->shift_direction = (valign == VALIGN_SUB) ? -1 : 1;
+-    event_images->event = event;
+     event_images->imgs = render_text(state);
+ 
+     if (state->border_style == 4)
+@@ -3286,6 +3384,69 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+     return true;
+ }
+ 
++#if ENABLE_THREADS
++static void *run_thread(void *ptr)
++{
++    ASS_Renderer *priv = ptr;
++
++    RenderContext state = {0};
++
++    thread_set_name("libass/render");
++
++    bool success = render_context_init(&state, priv);
++
++    pthread_mutex_lock(&priv->mutex);
++
++    if (!success) {
++        ass_msg(priv->library, MSGL_WARN, "Thread setup failed; disabling");
++        priv->thread_start_failed = 1;
++        goto fail;
++    }
++
++    priv->started_threads++;
++
++    pthread_cond_broadcast(&priv->main_cond);
++
++    for (;;) {
++        while (!priv->shutting_down &&
++               (atomic_load_explicit(&priv->next_eimg, memory_order_relaxed) >=
++                atomic_load_explicit(&priv->sent_eimgs, memory_order_relaxed)))
++            pthread_cond_wait(&priv->pool_cond, &priv->mutex);
++
++        if (priv->shutting_down)
++            break;
++
++        priv->active_threads++;
++
++        pthread_mutex_unlock(&priv->mutex);
++
++        uintptr_t got_eimg;
++        while ((got_eimg = atomic_fetch_add_explicit(&priv->next_eimg, 1, memory_order_relaxed)) < atomic_load_explicit(&priv->sent_eimgs, memory_order_relaxed)) {
++            EventImages *imgs = priv->eimg + got_eimg;
++
++            ass_render_event(&state, imgs);
++
++            if (atomic_fetch_sub_explicit(&priv->processing_eimgs, 1, memory_order_acq_rel) - 1 == 0)
++                break;
++        }
++
++        pthread_mutex_lock(&priv->mutex);
++
++        priv->active_threads--;
++
++        pthread_cond_signal(&priv->main_cond);
++    }
++
++fail:
++
++    pthread_mutex_unlock(&priv->mutex);
++
++    render_context_done(&state);
++
++    return NULL;
++}
++#endif
++
+ /**
+  * \brief Check cache limits and reset cache if they are exceeded
+  */
+@@ -3296,21 +3457,6 @@ static void check_cache_limits(ASS_Renderer *priv, CacheStore *cache)
+     ass_cache_cut(cache->outline_cache, cache->glyph_max);
+ }
+ 
+-static void setup_shaper(ASS_Shaper *shaper, ASS_Renderer *render_priv)
+-{
+-    ASS_Track *track = render_priv->track;
+-
+-    ass_shaper_set_kerning(shaper, track->Kerning);
+-    ass_shaper_set_language(shaper, track->Language);
+-    ass_shaper_set_level(shaper, render_priv->settings.shaper);
+-#ifdef USE_FRIBIDI_EX_API
+-    ass_shaper_set_bidi_brackets(shaper,
+-            track->parser_priv->feature_flags & FEATURE_MASK(ASS_FEATURE_BIDI_BRACKETS));
+-#endif
+-    ass_shaper_set_whole_text_layout(shaper,
+-            track->parser_priv->feature_flags & FEATURE_MASK(ASS_FEATURE_WHOLE_TEXT_LAYOUT));
+-}
+-
+ /**
+  * \brief Start a new frame
+  */
+@@ -3342,8 +3488,6 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
+             render_priv->fontselect, render_priv->num_emfonts);
+     }
+ 
+-    setup_shaper(render_priv->state.shaper, render_priv);
+-
+     // PAR correction
+     double par = render_priv->settings.par;
+     bool lr_track = track->LayoutResX > 0 && track->LayoutResY > 0;
+@@ -3363,6 +3507,7 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
+     render_priv->prev_images_root = render_priv->images_root;
+     render_priv->images_root = NULL;
+ 
++    ass_cache_promote(&render_priv->cache.client_set);
+     check_cache_limits(render_priv, &render_priv->cache);
+ 
+     return true;
+@@ -3372,6 +3517,12 @@ static int cmp_event_layer(const void *p1, const void *p2)
+ {
+     ASS_Event *e1 = ((EventImages *) p1)->event;
+     ASS_Event *e2 = ((EventImages *) p2)->event;
++    if (!e1 && !e2)
++        return 0;
++    if (e1 && !e2)
++        return -1;
++    if (!e1 && e2)
++        return 1;
+     if (e1->Layer < e2->Layer)
+         return -1;
+     if (e1->Layer > e2->Layer)
+@@ -3610,6 +3761,43 @@ static int ass_detect_change(ASS_Renderer *priv)
+     return diff;
+ }
+ 
++#if ENABLE_THREADS
++static bool start_threads(ASS_Renderer *priv)
++{
++    if (priv->n_threads == priv->settings.threads || priv->thread_start_failed)
++        return true;
++
++    join_threads(priv);
++
++    priv->shutting_down = 0;
++
++    if (priv->settings.threads <= 1)
++        return true;
++
++    if (!(priv->threads = calloc(priv->settings.threads, sizeof(pthread_t)))) {
++        ass_msg(priv->library, MSGL_ERR, "Allocation failure");
++        return false;
++    }
++
++    for (priv->n_threads = 0; priv->n_threads < priv->settings.threads; priv->n_threads++) {
++        if (pthread_create(&priv->threads[priv->n_threads], NULL, run_thread, priv) != 0) {
++            pthread_mutex_lock(&priv->mutex);
++            ass_msg(priv->library, MSGL_WARN, "Thread startup failure");
++            priv->thread_start_failed = 1;
++            pthread_mutex_unlock(&priv->mutex);
++            return true;
++        }
++    }
++
++    pthread_mutex_lock(&priv->mutex);
++    while (priv->started_threads < priv->n_threads && !priv->thread_start_failed)
++        pthread_cond_wait(&priv->main_cond, &priv->mutex);
++    pthread_mutex_unlock(&priv->mutex);
++
++    return true;
++}
++#endif
++
+ /**
+  * \brief free a single image.
+  * \param img image as returned by ass_render_frame().
+@@ -3660,8 +3848,37 @@ ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
+                     realloc(priv->eimg,
+                             priv->eimg_size * sizeof(EventImages));
+             }
+-            if (ass_render_event(&priv->state, event, priv->eimg + cnt))
+-                cnt++;
++            priv->eimg[cnt++] = (EventImages){
++                .event = event,
++            };
++        }
++    }
++
++#if ENABLE_THREADS
++    if (!start_threads(priv))
++        return NULL;
++
++    if (priv->n_threads > 0 && !priv->thread_start_failed && cnt > 1) {
++        pthread_mutex_lock(&priv->mutex);
++
++        while (priv->active_threads)
++            pthread_cond_wait(&priv->main_cond, &priv->mutex);
++
++        atomic_store_explicit(&priv->processing_eimgs, cnt, memory_order_release);
++        atomic_store_explicit(&priv->sent_eimgs, cnt, memory_order_release);
++        atomic_store_explicit(&priv->next_eimg, 0, memory_order_release);
++
++        pthread_cond_broadcast(&priv->pool_cond);
++
++        while (atomic_load_explicit(&priv->processing_eimgs, memory_order_acquire))
++            pthread_cond_wait(&priv->main_cond, &priv->mutex);
++
++        pthread_mutex_unlock(&priv->mutex);
++    } else
++#endif
++    {
++        for (int i = 0; i < cnt; i++) {
++            ass_render_event(&priv->state, priv->eimg + i);
+         }
+     }
+ 
+diff --git a/libass/ass_render.h b/libass/ass_render.h
+index 8f85e8e..97a53e1 100644
+--- a/libass/ass_render.h
++++ b/libass/ass_render.h
+@@ -20,6 +20,8 @@
+ #ifndef LIBASS_RENDER_H
+ #define LIBASS_RENDER_H
+ 
++#include "ass_compat.h"
++
+ #include <inttypes.h>
+ #include <stdbool.h>
+ #include <fribidi.h>
+@@ -39,6 +41,7 @@
+ #include "ass_drawing.h"
+ #include "ass_bitmap.h"
+ #include "ass_rasterizer.h"
++#include "ass_threading.h"
+ 
+ #define GLYPH_CACHE_MAX 10000
+ #define MEGABYTE (1024 * 1024)
+@@ -77,6 +80,10 @@ typedef struct {
+ 
+     char *default_font;
+     char *default_family;
++
++#if ENABLE_THREADS
++    int threads;
++#endif
+ } ASS_Settings;
+ 
+ // a rendered event
+@@ -211,6 +218,7 @@ struct render_context {
+     TextInfo text_info;
+     ASS_Shaper *shaper;
+     RasterizerData rasterizer;
++    CacheClient *cache_client;
+ 
+     ASS_Event *event;
+     ASS_Style *style;
+@@ -303,6 +311,7 @@ typedef struct {
+     Cache *composite_cache;
+     Cache *face_size_metrics_cache;
+     Cache *metrics_cache;
++    CacheClientSet client_set;
+     size_t glyph_max;
+     size_t bitmap_max_size;
+     size_t composite_max_size;
+@@ -338,6 +347,21 @@ struct ass_renderer {
+     BitmapEngine engine;
+ 
+     ASS_Style user_override_style;
++
++#if ENABLE_THREADS
++    pthread_mutex_t mutex;
++    int mutex_inited;
++    pthread_cond_t main_cond, pool_cond;
++    int main_cond_inited, pool_cond_inited;
++
++    unsigned n_threads, started_threads, active_threads;
++    pthread_t *threads;
++
++    int thread_start_failed;
++
++    int shutting_down;
++    _Atomic AtomicInt processing_eimgs, sent_eimgs, next_eimg;
++#endif
+ };
+ 
+ typedef struct render_priv {
+diff --git a/libass/ass_render_api.c b/libass/ass_render_api.c
+index ee1620a..5922084 100644
+--- a/libass/ass_render_api.c
++++ b/libass/ass_render_api.c
+@@ -31,6 +31,7 @@ static void ass_reconfigure(ASS_Renderer *priv)
+     ASS_Settings *settings = &priv->settings;
+ 
+     priv->render_id++;
++    ass_cache_promote(&priv->cache.client_set); // Just in case
+     ass_cache_empty(priv->cache.composite_cache);
+     ass_cache_empty(priv->cache.bitmap_cache);
+     ass_cache_empty(priv->cache.outline_cache);
+@@ -64,6 +65,22 @@ void ass_set_frame_size(ASS_Renderer *priv, int w, int h)
+     }
+ }
+ 
++unsigned ass_set_threads(ASS_Renderer *priv, unsigned threads)
++{
++#if ENABLE_THREADS
++    priv->library->thread_safe_cb = 1;
++
++    if (threads == 0)
++        threads = default_threads();
++
++    priv->settings.threads = threads;
++
++    return threads;
++#else
++    return 0;
++#endif
++}
++
+ void ass_set_storage_size(ASS_Renderer *priv, int w, int h)
+ {
+     if (w <= 0 || h <= 0 || w > FFMIN(INT_MAX, SIZE_MAX) / h)
+diff --git a/libass/ass_shaper.c b/libass/ass_shaper.c
+index d733d5d..070a35e 100644
+--- a/libass/ass_shaper.c
++++ b/libass/ass_shaper.c
+@@ -65,6 +65,7 @@ struct ass_shaper {
+     // Glyph and face-size metrics caches, to speed up shaping
+     Cache *face_size_metrics_cache;
+     Cache *metrics_cache;
++    CacheClient *cache_client;
+ 
+     hb_font_funcs_t *font_funcs;
+     hb_buffer_t *buf;
+@@ -78,7 +79,7 @@ struct ass_shaper {
+ };
+ 
+ struct ass_shaper_metrics_data {
+-    Cache *metrics_cache;
++    ASS_Shaper *shaper;
+     FaceSizeMetricsHashKey hash_key;
+ };
+ 
+@@ -226,7 +227,7 @@ get_cached_metrics(struct ass_shaper_metrics_data *metrics,
+         .size = metrics->hash_key.size,
+         .glyph_index = glyph,
+     };
+-    FT_Glyph_Metrics *val = ass_cache_get(metrics->metrics_cache, &key,
++    FT_Glyph_Metrics *val = ass_cache_get(metrics->shaper->metrics_cache, metrics->shaper->cache_client, &key,
+                                           rotate ? metrics : NULL);
+     if (!val || val->width < 0)
+         return NULL;
+@@ -239,12 +240,16 @@ size_t ass_face_size_metrics_construct(void *key, void *value, void *priv)
+     FaceSizeMetricsHashKey *k = key;
+     FT_Size_Metrics *v = value;
+ 
++    ass_font_lock(k->font);
++
+     FT_Face face = k->font->faces[k->face_index];
+ 
+     ass_face_set_size(face, k->size);
+ 
+     memcpy(v, &face->size->metrics, sizeof(FT_Size_Metrics));
+ 
++    ass_font_unlock(k->font);
++
+     return 1;
+ }
+ 
+@@ -256,13 +261,15 @@ size_t ass_glyph_metrics_construct(void *key, void *value, void *priv)
+     int load_flags = FT_LOAD_DEFAULT | FT_LOAD_IGNORE_GLOBAL_ADVANCE_WIDTH
+         | FT_LOAD_IGNORE_TRANSFORM;
+ 
++    ass_font_lock(k->font);
++
+     FT_Face face = k->font->faces[k->face_index];
+ 
+     ass_face_set_size(face, k->size);
+ 
+     if (FT_Load_Glyph(face, k->glyph_index, load_flags)) {
+         v->width = -1;
+-        return 1;
++        goto fail;
+     }
+ 
+     memcpy(v, &face->glyph->metrics, sizeof(FT_Glyph_Metrics));
+@@ -270,31 +277,46 @@ size_t ass_glyph_metrics_construct(void *key, void *value, void *priv)
+     if (priv)  // rotate
+         v->horiAdvance = v->vertAdvance;
+ 
++fail:
++    ass_font_unlock(k->font);
++
+     return 1;
+ }
+ 
++struct font_ref {
++    ASS_Font *font;
++    int face_index;
++};
++
+ static hb_blob_t*
+ get_reference_table(hb_face_t *hbface, hb_tag_t tag, void *font_data)
+ {
+-  FT_Face face = font_data;
++  struct font_ref *key = font_data;
+   FT_ULong len = 0;
++  hb_blob_t *blob = NULL;
++
++  ass_font_lock(key->font);
++
++  FT_Face face = key->font->faces[key->face_index];
+ 
+   if (FT_Load_Sfnt_Table(face, tag, 0, NULL, &len) != FT_Err_Ok)
+-    return NULL;
++    goto fail;
+ 
+   char *buf = malloc(len);
+   if (!buf)
+-    return NULL;
++    goto fail;
+ 
+   if (FT_Load_Sfnt_Table(face, tag, 0, (FT_Byte*)buf, &len) != FT_Err_Ok) {
+     free(buf);
+-    return NULL;
++    goto fail;
+   }
+ 
+-  hb_blob_t *blob = hb_blob_create(buf, len, HB_MEMORY_MODE_WRITABLE, buf, free);
++  blob = hb_blob_create(buf, len, HB_MEMORY_MODE_WRITABLE, buf, free);
+   if (len > 0 && hb_blob_is_immutable(blob))
+       free(buf);
+ 
++fail:
++  ass_font_unlock(key->font);
+   return blob;
+ }
+ 
+@@ -387,8 +409,14 @@ get_h_kerning(hb_font_t *font, void *font_data, hb_codepoint_t first,
+     FT_Face face = metrics_priv->hash_key.font->faces[metrics_priv->hash_key.face_index];
+     FT_Vector kern;
+ 
++    ass_font_lock(metrics_priv->hash_key.font);
++
++    ass_face_set_size(face, metrics_priv->hash_key.size);
++
+     if (FT_Get_Kerning(face, first, second, FT_KERNING_DEFAULT, &kern))
+-        return 0;
++        kern.x = 0;
++
++    ass_font_unlock(metrics_priv->hash_key.font);
+ 
+     return kern.x;
+ }
+@@ -425,25 +453,42 @@ get_contour_point(hb_font_t *font, void *font_data, hb_codepoint_t glyph,
+     FT_Face face = metrics_priv->hash_key.font->faces[metrics_priv->hash_key.face_index];
+     int load_flags = FT_LOAD_DEFAULT | FT_LOAD_IGNORE_GLOBAL_ADVANCE_WIDTH
+         | FT_LOAD_IGNORE_TRANSFORM;
++    bool ret = false;
++
++    ass_font_lock(metrics_priv->hash_key.font);
++
++    ass_face_set_size(face, metrics_priv->hash_key.size);
+ 
+     if (FT_Load_Glyph(face, glyph, load_flags))
+-        return false;
++        goto fail;
+ 
+     if (point_index >= (unsigned)face->glyph->outline.n_points)
+-        return false;
++        goto fail;
+ 
+     *x = face->glyph->outline.points[point_index].x;
+     *y = face->glyph->outline.points[point_index].y;
+-    return true;
++    ret = true;
++
++fail:
++    ass_font_unlock(metrics_priv->hash_key.font);
++    return ret;
+ }
+ 
+ bool ass_create_hb_font(ASS_Font *font, int index)
+ {
+-    FT_Face face = font->faces[index];
+-    hb_face_t *hb_face = hb_face_create_for_tables(get_reference_table, face, NULL);
++    struct font_ref *key = malloc(sizeof(struct font_ref));
++    if (!key)
++        return false;
++
++    key->font = font;
++    key->face_index = index;
++
++    // key will be freed by harfbuzz if hb_face_create_for_tables fails
++    hb_face_t *hb_face = hb_face_create_for_tables(get_reference_table, key, free);
+     if (hb_face_is_immutable(hb_face))
+         return false;
+ 
++    FT_Face face = font->faces[index];
+     hb_face_set_index(hb_face, face->face_index);
+     hb_face_set_upem(hb_face, face->units_per_EM);
+ 
+@@ -471,7 +516,7 @@ static hb_font_t *get_hb_font(ASS_Shaper *shaper, GlyphInfo *info)
+         .face_index = info->face_index,
+         .size = info->font_size,
+     };
+-    FT_Size_Metrics *m = ass_cache_get(shaper->face_size_metrics_cache, &key, NULL);
++    FT_Size_Metrics *m = ass_cache_get(shaper->face_size_metrics_cache, shaper->cache_client, &key, NULL);
+     if (!m)
+         return NULL;
+ 
+@@ -485,7 +530,7 @@ static hb_font_t *get_hb_font(ASS_Shaper *shaper, GlyphInfo *info)
+         hb_font_destroy(hb_font);
+         return NULL;
+     }
+-    metrics->metrics_cache = shaper->metrics_cache;
++    metrics->shaper = shaper;
+     metrics->hash_key = key;
+ 
+     hb_font_set_funcs(hb_font, shaper->font_funcs, metrics, free);
+@@ -1017,7 +1062,7 @@ bool ass_shaper_shape(ASS_Shaper *shaper, TextInfo *text_info)
+ /**
+  * \brief Create a new shaper instance
+  */
+-ASS_Shaper *ass_shaper_new(Cache *metrics_cache, Cache *face_size_metrics_cache)
++ASS_Shaper *ass_shaper_new(Cache *metrics_cache, Cache *face_size_metrics_cache, CacheClient *cache_client)
+ {
+     assert(metrics_cache);
+ 
+@@ -1031,6 +1076,7 @@ ASS_Shaper *ass_shaper_new(Cache *metrics_cache, Cache *face_size_metrics_cache)
+         goto error;
+     shaper->face_size_metrics_cache = face_size_metrics_cache;
+     shaper->metrics_cache = metrics_cache;
++    shaper->cache_client = cache_client;
+ 
+     hb_font_funcs_t *funcs = shaper->font_funcs = hb_font_funcs_create();
+     if (hb_font_funcs_is_immutable(funcs))
+diff --git a/libass/ass_shaper.h b/libass/ass_shaper.h
+index 06f868d..3167c42 100644
+--- a/libass/ass_shaper.h
++++ b/libass/ass_shaper.h
+@@ -31,7 +31,7 @@ typedef struct ass_shaper ASS_Shaper;
+ #endif
+ 
+ void ass_shaper_info(ASS_Library *lib);
+-ASS_Shaper *ass_shaper_new(Cache *metrics_cache, Cache *face_size_metrics_cache);
++ASS_Shaper *ass_shaper_new(Cache *metrics_cache, Cache *face_size_metrics_cache, CacheClient *cache_client);
+ void ass_shaper_free(ASS_Shaper *shaper);
+ bool ass_create_hb_font(ASS_Font *font, int index);
+ void ass_shaper_set_kerning(ASS_Shaper *shaper, bool kern);
+diff --git a/libass/ass_threading.h b/libass/ass_threading.h
+new file mode 100644
+index 0000000..2adbfb4
+--- /dev/null
++++ b/libass/ass_threading.h
+@@ -0,0 +1,360 @@
++/*
++ * Copyright (C) 2023 libass contributors
++ *
++ * This file is part of libass.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#ifndef LIBASS_THREADING_H
++#define LIBASS_THREADING_H
++
++#include "config.h"
++
++#include "ass_compat.h"
++
++#include <assert.h>
++#include <errno.h>
++#include <stdbool.h>
++#include <stdlib.h>
++#include <stdint.h>
++
++#ifdef HAVE_UNISTD_H
++#include <unistd.h>
++#endif
++
++#ifdef HAVE_SCHED_H
++#include <sched.h>
++#endif
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#endif
++
++#ifdef HAVE_STDATOMIC_H
++
++#include <stdatomic.h>
++#define HAVE_ATOMICS 1
++
++typedef intptr_t AtomicInt;
++
++#elif defined(_WIN32)
++
++#define HAVE_ATOMICS 1
++
++#ifdef _WIN64
++#define INTERLOCKED(op, order) Interlocked ## op ## order ## 64
++typedef LONG64 AtomicInt;
++#else
++#define INTERLOCKED(op, order) Interlocked ## op ## order
++typedef LONG AtomicInt;
++#endif
++
++// For some reason, Windows doesn't provide Release versions of InterlockedExchange,
++// so just fall back on the default acq_rel/seq_cst versions
++#define InterlockedExchangeRelease64 InterlockedExchange64
++#define InterlockedExchangeRelease InterlockedExchange
++
++#define memory_order_seq_cst
++#define memory_order_acq_rel
++#define memory_order_acquire Acquire
++#define memory_order_release Release
++#define memory_order_consume Release
++#define memory_order_relaxed NoFence
++
++#define IS_RELAXED(order) ((#order)[0] == 'N')
++#define MAYBE_FENCE(order) (!IS_RELAXED(order) ? MemoryBarrier() : (void)0)
++
++#define DO_COMPARE_EXCHANGE_STRONG(order) \
++static inline bool INTERLOCKED(DoCompareExchangePointer, order)(void *obj, void *expected, void *desired) \
++{ \
++    void *old = *(void**)expected; \
++    return (*(void**)expected = InterlockedCompareExchangePointer ## order((void**)obj, expected, desired)) == old; \
++}
++
++DO_COMPARE_EXCHANGE_STRONG()
++DO_COMPARE_EXCHANGE_STRONG(Acquire)
++DO_COMPARE_EXCHANGE_STRONG(Release)
++DO_COMPARE_EXCHANGE_STRONG(NoFence)
++
++#ifndef atomic_compare_exchange_strong_explicit
++#define atomic_compare_exchange_strong_explicit(obj, expected, desired, order, order2) \
++    INTERLOCKED(DoCompareExchangePointer, order)(obj, expected, desired)
++#endif
++
++#ifndef atomic_compare_exchange_weak_explicit
++#define atomic_compare_exchange_weak_explicit atomic_compare_exchange_strong_explicit
++#endif
++
++#ifndef atomic_store_explicit
++#define atomic_store_explicit(obj, desired, order) ((*(obj) = (desired)), MAYBE_FENCE(order))
++#endif
++
++#ifndef atomic_load_explicit
++#define atomic_load_explicit(obj, order) (MAYBE_FENCE(order), *(obj))
++#endif
++
++#ifndef atomic_fetch_add_explicit
++#define atomic_fetch_add_explicit(obj, arg, order) INTERLOCKED(ExchangeAdd, order)(obj, arg)
++#endif
++
++#ifndef atomic_fetch_sub_explicit
++#define atomic_fetch_sub_explicit(obj, arg, order) INTERLOCKED(ExchangeAdd, order)(obj, -(AtomicInt)arg)
++#endif
++
++#ifndef atomic_init
++#define atomic_init(obj, arg) (*(obj) = (arg))
++#endif
++
++#ifndef atomic_exchange_explicit
++#define atomic_exchange_explicit(obj, desired, order) INTERLOCKED(Exchange, order)(obj, desired)
++#endif
++
++#ifndef _Atomic
++#define _Atomic
++#endif
++
++#else // HAVE_STDATOMIC_H/_WIN32
++
++#define HAVE_ATOMICS 0
++
++typedef intptr_t AtomicInt;
++
++#ifndef atomic_compare_exchange_strong_explicit
++#define atomic_compare_exchange_strong_explicit(obj, expected, desired, order, order2) \
++    ((*(obj) == *(expected)) ? \
++        (*(obj) = (desired), true) : \
++        (*(expected) = *(obj), false))
++#endif
++
++#ifndef atomic_compare_exchange_weak
++#define atomic_compare_exchange_weak_explicit atomic_compare_exchange_strong_explicit
++#endif
++
++#ifndef atomic_store_explicit
++#define atomic_store_explicit(obj, desired, order) (*(obj) = (desired))
++#endif
++
++#ifndef atomic_load_explicit
++#define atomic_load_explicit(obj, order) (*(obj))
++#endif
++
++#define FETCH_OP(name, op) \
++static inline intptr_t do_fetch_ ## name(intptr_t *obj, intptr_t arg) \
++{ \
++    intptr_t ret = *obj; \
++    *obj = *obj op arg; \
++    return ret; \
++}
++
++#ifndef atomic_fetch_add_explicit
++FETCH_OP(add, +)
++#define atomic_fetch_add_explicit(obj, arg, order) do_fetch_add(obj, arg)
++#endif
++
++#ifndef atomic_fetch_sub_explicit
++FETCH_OP(sub, -)
++#define atomic_fetch_sub_explicit(obj, arg, order) do_fetch_sub(obj, arg)
++#endif
++
++#ifndef atomic_init
++#define atomic_init(obj, arg) (*(obj) = (arg))
++#endif
++
++#ifndef atomic_exchange_explicit
++static inline intptr_t do_exchange(intptr_t *obj, intptr_t desired) {
++    intptr_t old = *obj;
++    *obj = desired;
++    return old;
++}
++
++#define atomic_exchange_explicit(obj, desired, order) do_exchange(obj, desired)
++#endif
++
++#ifndef _Atomic
++#define _Atomic
++#endif
++
++#endif // HAVE_STDATOMIC_H/_WIN32
++
++#if HAVE_ATOMICS
++
++#ifdef CONFIG_W32THREAD
++
++#define ENABLE_THREADS 1
++
++struct ThreadStruct {
++    void *(*start_routine)(void *);
++    void *arg;
++    void *ret;
++    HANDLE handle;
++};
++
++typedef struct ThreadStruct *pthread_t;
++
++typedef SRWLOCK            pthread_mutex_t;
++typedef CONDITION_VARIABLE pthread_cond_t;
++
++static inline int pthread_mutex_init(pthread_mutex_t *mtx, const void *attr)
++{
++    assert(!attr);
++    InitializeSRWLock(mtx);
++    return 0;
++}
++
++#define pthread_mutex_destroy(x) ((void) 0) // No-op
++#define pthread_mutex_lock AcquireSRWLockExclusive
++#define pthread_mutex_unlock ReleaseSRWLockExclusive
++
++static inline bool pthread_cond_init(pthread_cond_t *cond, const void *attr)
++{
++    assert(!attr);
++    InitializeConditionVariable(cond);
++    return 0;
++}
++
++#define pthread_cond_destroy(x) ((void) 0) // No-op
++#define pthread_cond_signal WakeConditionVariable
++#define pthread_cond_broadcast WakeAllConditionVariable
++
++static inline int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
++{
++    return (SleepConditionVariableSRW(cond, mutex, INFINITE, 0) == 0) ? 0 : EINVAL;
++}
++
++static DWORD WINAPI
++#ifdef __GNUC__
++__attribute__((force_align_arg_pointer))
++#endif
++thread_start_func(void *arg)
++{
++    pthread_t thread = arg;
++    thread->ret = thread->start_routine(thread->arg);
++    return 0;
++}
++
++static inline int pthread_create(pthread_t *threadp, const void *attr, void *(*start_routine)(void *), void *arg)
++{
++    *threadp = NULL;
++
++    if (attr)
++        return EINVAL;
++
++    pthread_t thread = malloc(sizeof(struct ThreadStruct));
++    thread->start_routine = start_routine;
++    thread->arg = arg;
++    if ((thread->handle = CreateThread(NULL, 0, thread_start_func, thread, 0, NULL))) {
++        *threadp = thread;
++        return 0;
++    } else {
++        free(thread);
++        return EPERM;
++    }
++}
++
++static inline int pthread_join(pthread_t thread, void **value_ptr)
++{
++    DWORD ret = WaitForSingleObject(thread->handle, INFINITE);
++    CloseHandle(thread->handle);
++
++    if (ret == WAIT_OBJECT_0 && value_ptr)
++        *value_ptr = thread->ret;
++
++    free(thread);
++
++    return ret == WAIT_OBJECT_0 ? 0 : EINVAL;
++}
++
++static inline void thread_set_namew(PCWSTR name)
++{
++#if ASS_WINAPI_DESKTOP
++    HMODULE dll = GetModuleHandleW(L"kernel32.dll");
++    if (!dll)
++        return;
++
++    HRESULT (WINAPI *func)(HANDLE, PCWSTR) = (void *) GetProcAddress(dll, "SetThreadDescription");
++    if (!func)
++        return;
++
++    func(GetCurrentThread(), name);
++#endif
++}
++#define thread_set_name(x) thread_set_namew(L"" x)
++
++#elif defined(CONFIG_PTHREAD)
++
++#include <pthread.h>
++#define ENABLE_THREADS 1
++
++static inline void thread_set_name(const char *name)
++{
++#if HAVE_PTHREAD_SETNAME_NP
++#if defined(__APPLE__)
++    pthread_setname_np(name);
++#else // defined(__APPLE__)
++    pthread_setname_np(pthread_self(), name);
++#endif // defined(__APPLE__)
++#endif // HAVE_PTHREAD_SETNAME_NP
++}
++
++#endif /* CONFIG_PTHREAD */
++
++#define inc_ref(x) (void) (atomic_fetch_add_explicit(x, 1, memory_order_relaxed))
++#define dec_ref(x) (atomic_fetch_sub_explicit(x, 1, memory_order_acq_rel) - 1)
++
++#else /* HAVE_ATOMICS */
++
++static inline void inc_ref(AtomicInt *count) { ++(*count); }
++static inline AtomicInt dec_ref(AtomicInt *count) { return --(*count); }
++
++#endif /* HAVE_ATOMICS */
++
++#ifdef ENABLE_THREADS
++
++static inline unsigned default_threads(void)
++{
++    if (getenv("LIBASS_NO_THREADS"))
++        return 1;
++
++#if HAVE_SCHED_GETAFFINITY && defined(CPU_COUNT)
++    cpu_set_t cpuset;
++    CPU_ZERO(&cpuset);
++    if (!sched_getaffinity(0, sizeof(cpuset), &cpuset))
++        return CPU_COUNT(&cpuset);
++#elif defined(_SC_NPROCESSORS_ONLN)
++    long sc = sysconf(_SC_NPROCESSORS_ONLN);
++    if (sc < 0)
++        return 1;
++    return sc;
++#elif defined(_WIN32)
++    SYSTEM_INFO info;
++    GetNativeSystemInfo(&info);
++    return info.dwNumberOfProcessors;
++#endif
++
++    return 1;
++}
++
++#else /* ENABLE_THREADS */
++
++#define ENABLE_THREADS 0
++
++#define pthread_mutex_lock(x) do {} while(0)
++#define pthread_mutex_unlock(x) do {} while(0)
++#define pthread_cond_signal(x) do {} while(0)
++#define pthread_cond_broadcast(x) do {} while(0)
++
++#endif /* !ENABLE_THREADS */
++
++#endif                          /* LIBASS_THREADING_H */
+diff --git a/libass/ass_utils.c b/libass/ass_utils.c
+index d1e4c8f..71d0399 100644
+--- a/libass/ass_utils.c
++++ b/libass/ass_utils.c
+@@ -29,6 +29,7 @@
+ #include "ass.h"
+ #include "ass_utils.h"
+ #include "ass_string.h"
++#include "ass_threading.h"
+ 
+ // Fallbacks
+ #ifndef HAVE_STRDUP
+@@ -185,10 +186,20 @@ void *ass_try_realloc_array(void *ptr, size_t nmemb, size_t size)
+ 
+ void ass_msg(ASS_Library *priv, int lvl, const char *fmt, ...)
+ {
++#if ENABLE_THREADS
++    if (!priv->thread_safe_cb)
++        pthread_mutex_lock(&priv->log_mutex);
++#endif
++
+     va_list va;
+     va_start(va, fmt);
+     priv->msg_callback(lvl, fmt, va, priv->msg_callback_data);
+     va_end(va);
++
++#if ENABLE_THREADS
++    if (!priv->thread_safe_cb)
++        pthread_mutex_unlock(&priv->log_mutex);
++#endif
+ }
+ 
+ unsigned ass_utf8_get_char(char **str)
+diff --git a/libass/ass_utils.h b/libass/ass_utils.h
+index f6d60d3..a61dd3a 100644
+--- a/libass/ass_utils.h
++++ b/libass/ass_utils.h
+@@ -55,6 +55,18 @@
+ 
+ #define FEATURE_MASK(feat) (((uint32_t) 1) << (feat))
+ 
++#if DEBUG_LEVEL >= 1
++    #define ass_assert1(x) assert(x)
++#else
++    #define ass_assert1(x) (void)0
++#endif
++
++#if DEBUG_LEVEL >= 2
++    #define ass_assert2(x) assert(x)
++#else
++    #define ass_assert2(x) (void)0
++#endif
++
+ #if DEBUG_LEVEL >= 3
+     #define ASSUME(x) assert(x)
+ #elif __has_builtin(__builtin_assume)
+diff --git a/libass/libass.sym b/libass/libass.sym
+index 4cc6215..a8c423e 100644
+--- a/libass/libass.sym
++++ b/libass/libass.sym
+@@ -8,6 +8,7 @@ ass_renderer_init
+ ass_renderer_done
+ ass_set_frame_size
+ ass_set_storage_size
++ass_set_threads
+ ass_set_margins
+ ass_set_use_margins
+ ass_set_aspect_ratio
+diff --git a/m4/ax_pthread.m4 b/m4/ax_pthread.m4
+new file mode 100644
+index 0000000..9f35d13
+--- /dev/null
++++ b/m4/ax_pthread.m4
+@@ -0,0 +1,522 @@
++# ===========================================================================
++#        https://www.gnu.org/software/autoconf-archive/ax_pthread.html
++# ===========================================================================
++#
++# SYNOPSIS
++#
++#   AX_PTHREAD([ACTION-IF-FOUND[, ACTION-IF-NOT-FOUND]])
++#
++# DESCRIPTION
++#
++#   This macro figures out how to build C programs using POSIX threads. It
++#   sets the PTHREAD_LIBS output variable to the threads library and linker
++#   flags, and the PTHREAD_CFLAGS output variable to any special C compiler
++#   flags that are needed. (The user can also force certain compiler
++#   flags/libs to be tested by setting these environment variables.)
++#
++#   Also sets PTHREAD_CC and PTHREAD_CXX to any special C compiler that is
++#   needed for multi-threaded programs (defaults to the value of CC
++#   respectively CXX otherwise). (This is necessary on e.g. AIX to use the
++#   special cc_r/CC_r compiler alias.)
++#
++#   NOTE: You are assumed to not only compile your program with these flags,
++#   but also to link with them as well. For example, you might link with
++#   $PTHREAD_CC $CFLAGS $PTHREAD_CFLAGS $LDFLAGS ... $PTHREAD_LIBS $LIBS
++#   $PTHREAD_CXX $CXXFLAGS $PTHREAD_CFLAGS $LDFLAGS ... $PTHREAD_LIBS $LIBS
++#
++#   If you are only building threaded programs, you may wish to use these
++#   variables in your default LIBS, CFLAGS, and CC:
++#
++#     LIBS="$PTHREAD_LIBS $LIBS"
++#     CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
++#     CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"
++#     CC="$PTHREAD_CC"
++#     CXX="$PTHREAD_CXX"
++#
++#   In addition, if the PTHREAD_CREATE_JOINABLE thread-attribute constant
++#   has a nonstandard name, this macro defines PTHREAD_CREATE_JOINABLE to
++#   that name (e.g. PTHREAD_CREATE_UNDETACHED on AIX).
++#
++#   Also HAVE_PTHREAD_PRIO_INHERIT is defined if pthread is found and the
++#   PTHREAD_PRIO_INHERIT symbol is defined when compiling with
++#   PTHREAD_CFLAGS.
++#
++#   ACTION-IF-FOUND is a list of shell commands to run if a threads library
++#   is found, and ACTION-IF-NOT-FOUND is a list of commands to run it if it
++#   is not found. If ACTION-IF-FOUND is not specified, the default action
++#   will define HAVE_PTHREAD.
++#
++#   Please let the authors know if this macro fails on any platform, or if
++#   you have any other suggestions or comments. This macro was based on work
++#   by SGJ on autoconf scripts for FFTW (http://www.fftw.org/) (with help
++#   from M. Frigo), as well as ac_pthread and hb_pthread macros posted by
++#   Alejandro Forero Cuervo to the autoconf macro repository. We are also
++#   grateful for the helpful feedback of numerous users.
++#
++#   Updated for Autoconf 2.68 by Daniel Richard G.
++#
++# LICENSE
++#
++#   Copyright (c) 2008 Steven G. Johnson <stevenj@alum.mit.edu>
++#   Copyright (c) 2011 Daniel Richard G. <skunk@iSKUNK.ORG>
++#   Copyright (c) 2019 Marc Stevens <marc.stevens@cwi.nl>
++#
++#   This program is free software: you can redistribute it and/or modify it
++#   under the terms of the GNU General Public License as published by the
++#   Free Software Foundation, either version 3 of the License, or (at your
++#   option) any later version.
++#
++#   This program is distributed in the hope that it will be useful, but
++#   WITHOUT ANY WARRANTY; without even the implied warranty of
++#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
++#   Public License for more details.
++#
++#   You should have received a copy of the GNU General Public License along
++#   with this program. If not, see <https://www.gnu.org/licenses/>.
++#
++#   As a special exception, the respective Autoconf Macro's copyright owner
++#   gives unlimited permission to copy, distribute and modify the configure
++#   scripts that are the output of Autoconf when processing the Macro. You
++#   need not follow the terms of the GNU General Public License when using
++#   or distributing such scripts, even though portions of the text of the
++#   Macro appear in them. The GNU General Public License (GPL) does govern
++#   all other use of the material that constitutes the Autoconf Macro.
++#
++#   This special exception to the GPL applies to versions of the Autoconf
++#   Macro released by the Autoconf Archive. When you make and distribute a
++#   modified version of the Autoconf Macro, you may extend this special
++#   exception to the GPL to apply to your modified version as well.
++
++#serial 31
++
++AU_ALIAS([ACX_PTHREAD], [AX_PTHREAD])
++AC_DEFUN([AX_PTHREAD], [
++AC_REQUIRE([AC_CANONICAL_HOST])
++AC_REQUIRE([AC_PROG_CC])
++AC_REQUIRE([AC_PROG_SED])
++AC_LANG_PUSH([C])
++ax_pthread_ok=no
++
++# We used to check for pthread.h first, but this fails if pthread.h
++# requires special compiler flags (e.g. on Tru64 or Sequent).
++# It gets checked for in the link test anyway.
++
++# First of all, check if the user has set any of the PTHREAD_LIBS,
++# etcetera environment variables, and if threads linking works using
++# them:
++if test "x$PTHREAD_CFLAGS$PTHREAD_LIBS" != "x"; then
++        ax_pthread_save_CC="$CC"
++        ax_pthread_save_CFLAGS="$CFLAGS"
++        ax_pthread_save_LIBS="$LIBS"
++        AS_IF([test "x$PTHREAD_CC" != "x"], [CC="$PTHREAD_CC"])
++        AS_IF([test "x$PTHREAD_CXX" != "x"], [CXX="$PTHREAD_CXX"])
++        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
++        LIBS="$PTHREAD_LIBS $LIBS"
++        AC_MSG_CHECKING([for pthread_join using $CC $PTHREAD_CFLAGS $PTHREAD_LIBS])
++        AC_LINK_IFELSE([AC_LANG_CALL([], [pthread_join])], [ax_pthread_ok=yes])
++        AC_MSG_RESULT([$ax_pthread_ok])
++        if test "x$ax_pthread_ok" = "xno"; then
++                PTHREAD_LIBS=""
++                PTHREAD_CFLAGS=""
++        fi
++        CC="$ax_pthread_save_CC"
++        CFLAGS="$ax_pthread_save_CFLAGS"
++        LIBS="$ax_pthread_save_LIBS"
++fi
++
++# We must check for the threads library under a number of different
++# names; the ordering is very important because some systems
++# (e.g. DEC) have both -lpthread and -lpthreads, where one of the
++# libraries is broken (non-POSIX).
++
++# Create a list of thread flags to try. Items with a "," contain both
++# C compiler flags (before ",") and linker flags (after ","). Other items
++# starting with a "-" are C compiler flags, and remaining items are
++# library names, except for "none" which indicates that we try without
++# any flags at all, and "pthread-config" which is a program returning
++# the flags for the Pth emulation library.
++
++ax_pthread_flags="pthreads none -Kthread -pthread -pthreads -mthreads pthread --thread-safe -mt pthread-config"
++
++# The ordering *is* (sometimes) important.  Some notes on the
++# individual items follow:
++
++# pthreads: AIX (must check this before -lpthread)
++# none: in case threads are in libc; should be tried before -Kthread and
++#       other compiler flags to prevent continual compiler warnings
++# -Kthread: Sequent (threads in libc, but -Kthread needed for pthread.h)
++# -pthread: Linux/gcc (kernel threads), BSD/gcc (userland threads), Tru64
++#           (Note: HP C rejects this with "bad form for `-t' option")
++# -pthreads: Solaris/gcc (Note: HP C also rejects)
++# -mt: Sun Workshop C (may only link SunOS threads [-lthread], but it
++#      doesn't hurt to check since this sometimes defines pthreads and
++#      -D_REENTRANT too), HP C (must be checked before -lpthread, which
++#      is present but should not be used directly; and before -mthreads,
++#      because the compiler interprets this as "-mt" + "-hreads")
++# -mthreads: Mingw32/gcc, Lynx/gcc
++# pthread: Linux, etcetera
++# --thread-safe: KAI C++
++# pthread-config: use pthread-config program (for GNU Pth library)
++
++case $host_os in
++
++        freebsd*)
++
++        # -kthread: FreeBSD kernel threads (preferred to -pthread since SMP-able)
++        # lthread: LinuxThreads port on FreeBSD (also preferred to -pthread)
++
++        ax_pthread_flags="-kthread lthread $ax_pthread_flags"
++        ;;
++
++        hpux*)
++
++        # From the cc(1) man page: "[-mt] Sets various -D flags to enable
++        # multi-threading and also sets -lpthread."
++
++        ax_pthread_flags="-mt -pthread pthread $ax_pthread_flags"
++        ;;
++
++        openedition*)
++
++        # IBM z/OS requires a feature-test macro to be defined in order to
++        # enable POSIX threads at all, so give the user a hint if this is
++        # not set. (We don't define these ourselves, as they can affect
++        # other portions of the system API in unpredictable ways.)
++
++        AC_EGREP_CPP([AX_PTHREAD_ZOS_MISSING],
++            [
++#            if !defined(_OPEN_THREADS) && !defined(_UNIX03_THREADS)
++             AX_PTHREAD_ZOS_MISSING
++#            endif
++            ],
++            [AC_MSG_WARN([IBM z/OS requires -D_OPEN_THREADS or -D_UNIX03_THREADS to enable pthreads support.])])
++        ;;
++
++        solaris*)
++
++        # On Solaris (at least, for some versions), libc contains stubbed
++        # (non-functional) versions of the pthreads routines, so link-based
++        # tests will erroneously succeed. (N.B.: The stubs are missing
++        # pthread_cleanup_push, or rather a function called by this macro,
++        # so we could check for that, but who knows whether they'll stub
++        # that too in a future libc.)  So we'll check first for the
++        # standard Solaris way of linking pthreads (-mt -lpthread).
++
++        ax_pthread_flags="-mt,-lpthread pthread $ax_pthread_flags"
++        ;;
++esac
++
++# Are we compiling with Clang?
++
++AC_CACHE_CHECK([whether $CC is Clang],
++    [ax_cv_PTHREAD_CLANG],
++    [ax_cv_PTHREAD_CLANG=no
++     # Note that Autoconf sets GCC=yes for Clang as well as GCC
++     if test "x$GCC" = "xyes"; then
++        AC_EGREP_CPP([AX_PTHREAD_CC_IS_CLANG],
++            [/* Note: Clang 2.7 lacks __clang_[a-z]+__ */
++#            if defined(__clang__) && defined(__llvm__)
++             AX_PTHREAD_CC_IS_CLANG
++#            endif
++            ],
++            [ax_cv_PTHREAD_CLANG=yes])
++     fi
++    ])
++ax_pthread_clang="$ax_cv_PTHREAD_CLANG"
++
++
++# GCC generally uses -pthread, or -pthreads on some platforms (e.g. SPARC)
++
++# Note that for GCC and Clang -pthread generally implies -lpthread,
++# except when -nostdlib is passed.
++# This is problematic using libtool to build C++ shared libraries with pthread:
++# [1] https://gcc.gnu.org/bugzilla/show_bug.cgi?id=25460
++# [2] https://bugzilla.redhat.com/show_bug.cgi?id=661333
++# [3] https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=468555
++# To solve this, first try -pthread together with -lpthread for GCC
++
++AS_IF([test "x$GCC" = "xyes"],
++      [ax_pthread_flags="-pthread,-lpthread -pthread -pthreads $ax_pthread_flags"])
++
++# Clang takes -pthread (never supported any other flag), but we'll try with -lpthread first
++
++AS_IF([test "x$ax_pthread_clang" = "xyes"],
++      [ax_pthread_flags="-pthread,-lpthread -pthread"])
++
++
++# The presence of a feature test macro requesting re-entrant function
++# definitions is, on some systems, a strong hint that pthreads support is
++# correctly enabled
++
++case $host_os in
++        darwin* | hpux* | linux* | osf* | solaris*)
++        ax_pthread_check_macro="_REENTRANT"
++        ;;
++
++        aix*)
++        ax_pthread_check_macro="_THREAD_SAFE"
++        ;;
++
++        *)
++        ax_pthread_check_macro="--"
++        ;;
++esac
++AS_IF([test "x$ax_pthread_check_macro" = "x--"],
++      [ax_pthread_check_cond=0],
++      [ax_pthread_check_cond="!defined($ax_pthread_check_macro)"])
++
++
++if test "x$ax_pthread_ok" = "xno"; then
++for ax_pthread_try_flag in $ax_pthread_flags; do
++
++        case $ax_pthread_try_flag in
++                none)
++                AC_MSG_CHECKING([whether pthreads work without any flags])
++                ;;
++
++                *,*)
++                PTHREAD_CFLAGS=`echo $ax_pthread_try_flag | sed "s/^\(.*\),\(.*\)$/\1/"`
++                PTHREAD_LIBS=`echo $ax_pthread_try_flag | sed "s/^\(.*\),\(.*\)$/\2/"`
++                AC_MSG_CHECKING([whether pthreads work with "$PTHREAD_CFLAGS" and "$PTHREAD_LIBS"])
++                ;;
++
++                -*)
++                AC_MSG_CHECKING([whether pthreads work with $ax_pthread_try_flag])
++                PTHREAD_CFLAGS="$ax_pthread_try_flag"
++                ;;
++
++                pthread-config)
++                AC_CHECK_PROG([ax_pthread_config], [pthread-config], [yes], [no])
++                AS_IF([test "x$ax_pthread_config" = "xno"], [continue])
++                PTHREAD_CFLAGS="`pthread-config --cflags`"
++                PTHREAD_LIBS="`pthread-config --ldflags` `pthread-config --libs`"
++                ;;
++
++                *)
++                AC_MSG_CHECKING([for the pthreads library -l$ax_pthread_try_flag])
++                PTHREAD_LIBS="-l$ax_pthread_try_flag"
++                ;;
++        esac
++
++        ax_pthread_save_CFLAGS="$CFLAGS"
++        ax_pthread_save_LIBS="$LIBS"
++        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
++        LIBS="$PTHREAD_LIBS $LIBS"
++
++        # Check for various functions.  We must include pthread.h,
++        # since some functions may be macros.  (On the Sequent, we
++        # need a special flag -Kthread to make this header compile.)
++        # We check for pthread_join because it is in -lpthread on IRIX
++        # while pthread_create is in libc.  We check for pthread_attr_init
++        # due to DEC craziness with -lpthreads.  We check for
++        # pthread_cleanup_push because it is one of the few pthread
++        # functions on Solaris that doesn't have a non-functional libc stub.
++        # We try pthread_create on general principles.
++
++        AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <pthread.h>
++#                       if $ax_pthread_check_cond
++#                        error "$ax_pthread_check_macro must be defined"
++#                       endif
++                        static void *some_global = NULL;
++                        static void routine(void *a)
++                          {
++                             /* To avoid any unused-parameter or
++                                unused-but-set-parameter warning.  */
++                             some_global = a;
++                          }
++                        static void *start_routine(void *a) { return a; }],
++                       [pthread_t th; pthread_attr_t attr;
++                        pthread_create(&th, 0, start_routine, 0);
++                        pthread_join(th, 0);
++                        pthread_attr_init(&attr);
++                        pthread_cleanup_push(routine, 0);
++                        pthread_cleanup_pop(0) /* ; */])],
++            [ax_pthread_ok=yes],
++            [])
++
++        CFLAGS="$ax_pthread_save_CFLAGS"
++        LIBS="$ax_pthread_save_LIBS"
++
++        AC_MSG_RESULT([$ax_pthread_ok])
++        AS_IF([test "x$ax_pthread_ok" = "xyes"], [break])
++
++        PTHREAD_LIBS=""
++        PTHREAD_CFLAGS=""
++done
++fi
++
++
++# Clang needs special handling, because older versions handle the -pthread
++# option in a rather... idiosyncratic way
++
++if test "x$ax_pthread_clang" = "xyes"; then
++
++        # Clang takes -pthread; it has never supported any other flag
++
++        # (Note 1: This will need to be revisited if a system that Clang
++        # supports has POSIX threads in a separate library.  This tends not
++        # to be the way of modern systems, but it's conceivable.)
++
++        # (Note 2: On some systems, notably Darwin, -pthread is not needed
++        # to get POSIX threads support; the API is always present and
++        # active.  We could reasonably leave PTHREAD_CFLAGS empty.  But
++        # -pthread does define _REENTRANT, and while the Darwin headers
++        # ignore this macro, third-party headers might not.)
++
++        # However, older versions of Clang make a point of warning the user
++        # that, in an invocation where only linking and no compilation is
++        # taking place, the -pthread option has no effect ("argument unused
++        # during compilation").  They expect -pthread to be passed in only
++        # when source code is being compiled.
++        #
++        # Problem is, this is at odds with the way Automake and most other
++        # C build frameworks function, which is that the same flags used in
++        # compilation (CFLAGS) are also used in linking.  Many systems
++        # supported by AX_PTHREAD require exactly this for POSIX threads
++        # support, and in fact it is often not straightforward to specify a
++        # flag that is used only in the compilation phase and not in
++        # linking.  Such a scenario is extremely rare in practice.
++        #
++        # Even though use of the -pthread flag in linking would only print
++        # a warning, this can be a nuisance for well-run software projects
++        # that build with -Werror.  So if the active version of Clang has
++        # this misfeature, we search for an option to squash it.
++
++        AC_CACHE_CHECK([whether Clang needs flag to prevent "argument unused" warning when linking with -pthread],
++            [ax_cv_PTHREAD_CLANG_NO_WARN_FLAG],
++            [ax_cv_PTHREAD_CLANG_NO_WARN_FLAG=unknown
++             # Create an alternate version of $ac_link that compiles and
++             # links in two steps (.c -> .o, .o -> exe) instead of one
++             # (.c -> exe), because the warning occurs only in the second
++             # step
++             ax_pthread_save_ac_link="$ac_link"
++             ax_pthread_sed='s/conftest\.\$ac_ext/conftest.$ac_objext/g'
++             ax_pthread_link_step=`AS_ECHO(["$ac_link"]) | sed "$ax_pthread_sed"`
++             ax_pthread_2step_ac_link="($ac_compile) && (echo ==== >&5) && ($ax_pthread_link_step)"
++             ax_pthread_save_CFLAGS="$CFLAGS"
++             for ax_pthread_try in '' -Qunused-arguments -Wno-unused-command-line-argument unknown; do
++                AS_IF([test "x$ax_pthread_try" = "xunknown"], [break])
++                CFLAGS="-Werror -Wunknown-warning-option $ax_pthread_try -pthread $ax_pthread_save_CFLAGS"
++                ac_link="$ax_pthread_save_ac_link"
++                AC_LINK_IFELSE([AC_LANG_SOURCE([[int main(void){return 0;}]])],
++                    [ac_link="$ax_pthread_2step_ac_link"
++                     AC_LINK_IFELSE([AC_LANG_SOURCE([[int main(void){return 0;}]])],
++                         [break])
++                    ])
++             done
++             ac_link="$ax_pthread_save_ac_link"
++             CFLAGS="$ax_pthread_save_CFLAGS"
++             AS_IF([test "x$ax_pthread_try" = "x"], [ax_pthread_try=no])
++             ax_cv_PTHREAD_CLANG_NO_WARN_FLAG="$ax_pthread_try"
++            ])
++
++        case "$ax_cv_PTHREAD_CLANG_NO_WARN_FLAG" in
++                no | unknown) ;;
++                *) PTHREAD_CFLAGS="$ax_cv_PTHREAD_CLANG_NO_WARN_FLAG $PTHREAD_CFLAGS" ;;
++        esac
++
++fi # $ax_pthread_clang = yes
++
++
++
++# Various other checks:
++if test "x$ax_pthread_ok" = "xyes"; then
++        ax_pthread_save_CFLAGS="$CFLAGS"
++        ax_pthread_save_LIBS="$LIBS"
++        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
++        LIBS="$PTHREAD_LIBS $LIBS"
++
++        # Detect AIX lossage: JOINABLE attribute is called UNDETACHED.
++        AC_CACHE_CHECK([for joinable pthread attribute],
++            [ax_cv_PTHREAD_JOINABLE_ATTR],
++            [ax_cv_PTHREAD_JOINABLE_ATTR=unknown
++             for ax_pthread_attr in PTHREAD_CREATE_JOINABLE PTHREAD_CREATE_UNDETACHED; do
++                 AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <pthread.h>],
++                                                 [int attr = $ax_pthread_attr; return attr /* ; */])],
++                                [ax_cv_PTHREAD_JOINABLE_ATTR=$ax_pthread_attr; break],
++                                [])
++             done
++            ])
++        AS_IF([test "x$ax_cv_PTHREAD_JOINABLE_ATTR" != "xunknown" && \
++               test "x$ax_cv_PTHREAD_JOINABLE_ATTR" != "xPTHREAD_CREATE_JOINABLE" && \
++               test "x$ax_pthread_joinable_attr_defined" != "xyes"],
++              [AC_DEFINE_UNQUOTED([PTHREAD_CREATE_JOINABLE],
++                                  [$ax_cv_PTHREAD_JOINABLE_ATTR],
++                                  [Define to necessary symbol if this constant
++                                   uses a non-standard name on your system.])
++               ax_pthread_joinable_attr_defined=yes
++              ])
++
++        AC_CACHE_CHECK([whether more special flags are required for pthreads],
++            [ax_cv_PTHREAD_SPECIAL_FLAGS],
++            [ax_cv_PTHREAD_SPECIAL_FLAGS=no
++             case $host_os in
++             solaris*)
++             ax_cv_PTHREAD_SPECIAL_FLAGS="-D_POSIX_PTHREAD_SEMANTICS"
++             ;;
++             esac
++            ])
++        AS_IF([test "x$ax_cv_PTHREAD_SPECIAL_FLAGS" != "xno" && \
++               test "x$ax_pthread_special_flags_added" != "xyes"],
++              [PTHREAD_CFLAGS="$ax_cv_PTHREAD_SPECIAL_FLAGS $PTHREAD_CFLAGS"
++               ax_pthread_special_flags_added=yes])
++
++        AC_CACHE_CHECK([for PTHREAD_PRIO_INHERIT],
++            [ax_cv_PTHREAD_PRIO_INHERIT],
++            [AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <pthread.h>]],
++                                             [[int i = PTHREAD_PRIO_INHERIT;
++                                               return i;]])],
++                            [ax_cv_PTHREAD_PRIO_INHERIT=yes],
++                            [ax_cv_PTHREAD_PRIO_INHERIT=no])
++            ])
++        AS_IF([test "x$ax_cv_PTHREAD_PRIO_INHERIT" = "xyes" && \
++               test "x$ax_pthread_prio_inherit_defined" != "xyes"],
++              [AC_DEFINE([HAVE_PTHREAD_PRIO_INHERIT], [1], [Have PTHREAD_PRIO_INHERIT.])
++               ax_pthread_prio_inherit_defined=yes
++              ])
++
++        CFLAGS="$ax_pthread_save_CFLAGS"
++        LIBS="$ax_pthread_save_LIBS"
++
++        # More AIX lossage: compile with *_r variant
++        if test "x$GCC" != "xyes"; then
++            case $host_os in
++                aix*)
++                AS_CASE(["x/$CC"],
++                    [x*/c89|x*/c89_128|x*/c99|x*/c99_128|x*/cc|x*/cc128|x*/xlc|x*/xlc_v6|x*/xlc128|x*/xlc128_v6],
++                    [#handle absolute path differently from PATH based program lookup
++                     AS_CASE(["x$CC"],
++                         [x/*],
++                         [
++			   AS_IF([AS_EXECUTABLE_P([${CC}_r])],[PTHREAD_CC="${CC}_r"])
++			   AS_IF([test "x${CXX}" != "x"], [AS_IF([AS_EXECUTABLE_P([${CXX}_r])],[PTHREAD_CXX="${CXX}_r"])])
++			 ],
++                         [
++			   AC_CHECK_PROGS([PTHREAD_CC],[${CC}_r],[$CC])
++			   AS_IF([test "x${CXX}" != "x"], [AC_CHECK_PROGS([PTHREAD_CXX],[${CXX}_r],[$CXX])])
++			 ]
++                     )
++                    ])
++                ;;
++            esac
++        fi
++fi
++
++test -n "$PTHREAD_CC" || PTHREAD_CC="$CC"
++test -n "$PTHREAD_CXX" || PTHREAD_CXX="$CXX"
++
++AC_SUBST([PTHREAD_LIBS])
++AC_SUBST([PTHREAD_CFLAGS])
++AC_SUBST([PTHREAD_CC])
++AC_SUBST([PTHREAD_CXX])
++
++# Finally, execute ACTION-IF-FOUND/ACTION-IF-NOT-FOUND:
++if test "x$ax_pthread_ok" = "xyes"; then
++        ifelse([$1],,[AC_DEFINE([HAVE_PTHREAD],[1],[Define if you have POSIX threads libraries and header files.])],[$1])
++        :
++else
++        ax_pthread_ok=no
++        $2
++fi
++AC_LANG_POP
++])dnl AX_PTHREAD
+diff --git a/meson.build b/meson.build
+index 56e9a59..1272889 100644
+--- a/meson.build
++++ b/meson.build
+@@ -4,7 +4,7 @@ project(
+     license: 'ISC',
+     meson_version: '>= 0.64.0',
+     default_options: [
+-        'c_std=gnu99',
++        'c_std=' + ((meson.version().version_compare('>= 1.3.0') and not meson.version().endswith('.99')) ? 'gnu11,gnu99,c11,c99' : 'gnu99'),
+         'buildtype=debugoptimized',
+         'warning_level=2',
+         'default_library=static',
+@@ -42,6 +42,7 @@ if cc.get_argument_syntax() == 'gcc'
+         '-Wno-missing-field-initializers',
+         '-Wformat-non-iso',
+         '-Werror=format-non-iso',
++        '-Watomic-implicit-seq-cst',
+     ]
+ elif cc.get_id() == 'msvc'
+     cc_warnings += [
+@@ -60,16 +61,22 @@ add_project_arguments(
+ 
+ # Configuration
+ 
+-str_check_functions = ['strdup', 'strndup', 'strchrnul']
+-
+-foreach name : str_check_functions
+-    if (
+-        cc.has_function(name)
+-        and cc.has_header_symbol('string.h', name, args: cc_features)
+-    )
+-        conf.set('HAVE_@0@'.format(name.to_upper()), 1)
+-    endif
+-endforeach
++ check_functions = {
++   'string.h': ['strdup', 'strndup', 'strchrnul'],
++   'sched.h': ['sched_getaffinity'],
++   'pthread.h': ['pthread_setname_np'],
++ }
++
++foreach header, functions : check_functions
++    foreach func : functions
++        if (
++            cc.has_function(func)
++            and cc.has_header_symbol(header, func, args: cc_features)
++        )
++            conf.set('HAVE_@0@'.format(func.to_upper()), 1)
++         endif
++     endforeach
++ endforeach
+ 
+ if (
+     cc.has_function('fstat')
+@@ -83,6 +90,17 @@ if (
+     conf.set('HAVE_FSTAT', 1)
+ endif
+ 
++have_stdatomic = cc.check_header('stdatomic.h')
++if have_stdatomic
++    conf.set('HAVE_STDATOMIC_H', 1)
++endif
++if cc.check_header('unistd.h')
++    conf.set('HAVE_UNISTD_H', 1)
++endif
++if cc.check_header('sched.h')
++    conf.set('HAVE_SCHED_H', 1)
++endif
++
+ # Dependencies
+ 
+ deps += cc.find_library('m', required: false)
+@@ -101,7 +119,7 @@ deps += dependency(
+ 
+ deps += dependency(
+     'fribidi',
+-    version: '>= 0.19.1',
++    version: '>= 0.19.7',
+     default_options: ['docs=false', 'tests=false'],
+ )
+ 
+@@ -151,6 +169,40 @@ if fontconfig
+     font_providers += ['Fontconfig']
+ endif
+ 
++enable_threads = false
++threads_opt = get_option('threads')
++if not threads_opt.disabled()
++    if host_system in ['windows', 'cygwin']
++        conf.set('CONFIG_W32THREAD', 1)
++        enable_threads = true
++    elif host_system in ['darwin', 'linux', 'sunos', 'haiku', 'gnu', 'dragonfly'] or host_system.endswith('bsd')
++        if have_stdatomic
++            thread_dep = dependency('threads')
++            if thread_dep.found()
++                conf.set('CONFIG_PTHREAD', 1)
++                deps += thread_dep
++                enable_threads = true
++            elif threads_opt.enabled()
++                error(
++                    'threading support was requested, but it was not found.',
++                )
++            endif
++        elif threads_opt.enabled()
++            error(
++                'threading support was requested, but atomic support was not found.',
++            )
++        endif
++    elif threads_opt.enabled()
++        error(
++            'threading support was requested, but the threading API for this platform is unknown.',
++        )
++    else
++        warning(
++            'the threading API for this platform is unknown.',
++        )
++    endif
++endif
++
+ # Core Text
+ coretext = false
+ if not get_option('coretext').disabled()
+@@ -424,3 +476,4 @@ endif
+ 
+ summary('Font providers', font_providers)
+ summary('ASM optimizations', enable_asm, bool_yn: true)
++summary('Threading', enable_threads, bool_yn: true)
+diff --git a/meson_options.txt b/meson_options.txt
+index ff560da..678e183 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -7,6 +7,8 @@ option('art-samples', type: 'string', description: 'Path to the root of regressi
+ option('fuzz-link-args', type: 'string', description: 'Additional link flags for fuzz targets.')
+ option('fuzz-link-language', type : 'combo', choices : ['c', 'cpp'], value : 'c', description: 'Linking language for fuzz targets.')
+ 
++option('threads', type: 'feature', description: 'multithreading support')
++
+ option('fontconfig', type: 'feature', description: 'Fontconfig support')
+ option('directwrite', type: 'feature', description: 'DirectWrite support (win32 only)')
+ option('coretext', type: 'feature', description: 'Core Text support (Apple only)')

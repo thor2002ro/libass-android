@@ -24,7 +24,7 @@
 #include <stdarg.h>
 #include "ass_types.h"
 
-#define LIBASS_VERSION 0x01703000
+#define LIBASS_VERSION 0x01705010
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,9 +62,12 @@ extern "C" {
 typedef struct ass_image {
     int w, h;                   // Bitmap width/height
     int stride;                 // Bitmap stride
-    unsigned char *bitmap;      // 1bpp stride*h alpha buffer
+    unsigned char *bitmap;      // 1-byte-per-pixel alpha buffer
                                 // Note: the last row may not be padded to
                                 // bitmap stride!
+                                // The guaranteed allocated size is
+                                // `(stride * (h - 1)) + w`, and bytes past
+                                // the width in each line may be uninitialized.
     uint32_t color;             // Bitmap color and alpha, RGBA
                                 // For full VSFilter compatibility, the value
                                 // must be transformed as described in
@@ -154,11 +157,11 @@ typedef enum {
      */
     ASS_OVERRIDE_BIT_FONT_SIZE ASS_DEPRECATED_ENUM("replaced by ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE") = 1 << 1,
     /**
-     * On dialogue events override: FontSize, Spacing, Blur, ScaleX, ScaleY
+     * On dialogue events override: FontSize, Spacing, ScaleX, ScaleY
      */
     ASS_OVERRIDE_BIT_FONT_SIZE_FIELDS = 1 << 2,
     /**
-     * On dialogue events override: FontName, treat_fontname_as_pattern
+     * On dialogue events override: FontName
      */
     ASS_OVERRIDE_BIT_FONT_NAME = 1 << 3,
     /**
@@ -194,6 +197,10 @@ typedef enum {
      * On dialogue events override: Justify
      */
     ASS_OVERRIDE_BIT_JUSTIFY = 1 << 10,
+    /**
+     * On dialogue events override: Blur
+     */
+    ASS_OVERRIDE_BIT_BLUR = 1 << 11,
     // New enum values can be added here in new ABI-compatible library releases.
 } ASS_OverrideBits;
 
@@ -394,6 +401,20 @@ void ass_renderer_done(ASS_Renderer *priv);
 void ass_set_frame_size(ASS_Renderer *priv, int w, int h);
 
 /**
+ * \brief Set the number of threads to use during rendering. Default is 0,
+ * meaning the number of available logical cores if known, otherwise 1.
+ * \param priv renderer handle
+ * \param threads number of threads
+ *
+ * \return number of threads that will be used (if 0 is passed, the autodetected
+ * count will be returned), or 0 if libass was built without threading support.
+ *
+ * Calling this function requires the log callback of the associated ASS_Library
+ * to be thread-safe, and opts out of internal locking around log calls.
+ */
+unsigned ass_set_threads(ASS_Renderer *priv, unsigned threads);
+
+/**
  * \brief Set the source image size in pixels.
  * This affects some ASS tags like e.g. 3D transforms and
  * is used to calculate the source aspect ratio and blur scale.
@@ -537,7 +558,7 @@ void ass_get_available_font_providers(ASS_Library *priv,
  * \param default_family fallback font family, or NULL
  * \param dfp which font provider to use (one of ASS_DefaultFontProvider). In
  * older libass version, this could be 0 or 1, where 1 enabled fontconfig.
- * Newer relases also accept 0 (ASS_FONTPROVIDER_NONE) and 1
+ * Newer releases also accept 0 (ASS_FONTPROVIDER_NONE) and 1
  * (ASS_FONTPROVIDER_AUTODETECT), which is almost backward-compatible.
  * If the requested fontprovider does not exist or fails to initialize, the
  * behavior is the same as when ASS_FONTPROVIDER_NONE was passed.
@@ -690,7 +711,7 @@ void ass_free_style(ASS_Track *track, int sid);
 void ass_free_event(ASS_Track *track, int eid);
 
 /**
- * \brief Parse a chunk of subtitle stream data.
+ * \brief Parse full lines of subtitle stream data.
  * \param track track
  * \param data string to parse
  * \param size length of data
@@ -733,6 +754,24 @@ void ass_process_chunk(ASS_Track *track, const char *data, int size,
  * If this function is not called, the default value is 1.
  */
 void ass_set_check_readorder(ASS_Track *track, int check_readorder);
+
+/**
+ * \brief Prune events that preceed deadline.
+ * \param track track
+ * \param deadline cut-off timestamp in milliseconds.
+*/
+void ass_prune_events(ASS_Track *track, long long deadline);
+
+/**
+ * \brief Configure automatic pruning of events.
+ * \param track track
+ * \param delay delay from "now" (ass_render_frame) in milliseconds.
+ * After every render, events whose undisplay timestamp predate
+ * "now - delay" will be deleted. A delay of 0 prunes aggressively.
+ * Negative delays disable automatic pruning.
+ * Disabled by default (no removal of events from memory).
+ */
+void ass_configure_prune(ASS_Track *track, long long delay);
 
 /**
  * \brief Flush buffered events.
