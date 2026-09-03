@@ -46,6 +46,8 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) : AutoCloseabl
             track: Long,
             time: Long,
             maxAtlasSize: Int,
+            allowIncremental: Boolean,
+            forceReplacement: Boolean,
         ): AssAtlasFrame?
 
         @JvmStatic
@@ -115,7 +117,13 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) : AutoCloseabl
      * contains no page bytes; callers must reuse the textures from the last
      * content-changing frame.
      */
-    fun renderAtlasFrame(time: Long, maxAtlasSize: Int): AssAtlasFrame? = lock.withLock {
+    @JvmOverloads
+    fun renderAtlasFrame(
+        time: Long,
+        maxAtlasSize: Int,
+        allowIncremental: Boolean = false,
+        forceReplacement: Boolean = false,
+    ): AssAtlasFrame? = lock.withLock {
         if (released || nativeRender == 0L || maxAtlasSize <= 0) return null
         val selectedTrack = track ?: return null
         if (selectedTrack.released || selectedTrack.nativeAssTrack == 0L) return null
@@ -124,6 +132,8 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) : AutoCloseabl
             selectedTrack.nativeAssTrack,
             time,
             maxAtlasSize,
+            allowIncremental,
+            forceReplacement,
         )
     }
 

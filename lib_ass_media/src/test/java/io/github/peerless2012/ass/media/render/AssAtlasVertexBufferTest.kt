@@ -94,6 +94,21 @@ class AssAtlasVertexBufferTest {
         assertFalse(geometry.update(frame, 10, 10))
     }
 
+    @Test
+    fun buildsGeometryRelativeToSurfaceOrigin() {
+        val geometry = AssAtlasVertexBuffer()
+        val frame = frame(
+            pages = arrayOf(ByteArray(16)),
+            widths = intArrayOf(4),
+            heights = intArrayOf(4),
+            quads = intArrayOf(110, 220, 4, 4, 0, 0, 0, 0),
+        )
+
+        assertTrue(geometry.update(frame, 100, 100, originX = 100, originY = 200))
+        assertFloatEquals(-0.8f, geometry.vertices.getFloat(0))
+        assertFloatEquals(0.6f, geometry.vertices.getFloat(4))
+    }
+
     private fun frame(
         pages: Array<ByteArray>,
         widths: IntArray,

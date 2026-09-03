@@ -10,15 +10,18 @@ import androidx.media3.common.util.UnstableApi
 import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.media.AssPerformanceStatsCollector
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
 
 /** Draws libass alpha-atlas pages into the currently bound framebuffer. */
 @OptIn(UnstableApi::class)
 internal class AssAtlasGlRenderer(
     private val statsCollector: AssPerformanceStatsCollector? = null,
+    private val uploadMode: UploadMode = UploadMode.AUTO,
 ) {
+    internal enum class UploadMode { AUTO, DIRECT, PBO }
+
     enum class DrawResult {
         UNCHANGED,
+        NEEDS_REPLACEMENT,
         REDRAWN_EMPTY,
         REDRAWN_CONTENT,
     }
@@ -33,8 +36,6 @@ internal class AssAtlasGlRenderer(
     private var indexBufferId = 0
     private var gpuVertexCapacityBytes = 0
     private var gpuIndexCapacityBytes = 0
-    private var uploadBuffer: ByteBuffer? = null
-    private var uploadBufferCapacity = 0
     private var pboIds = IntArray(0)
     private var pboCapacities = IntArray(0)
     private var nextPbo = 0
@@ -49,6 +50,9 @@ internal class AssAtlasGlRenderer(
     private var isGles3 = false
     private var uploadedContentSerial = 0L
     private var currentMode: String? = null
+
+    val supportsIncrementalUpdates: Boolean
+        get() = initialized && isGles3
 
     fun initialize() {
         if (initialized) return
@@ -80,7 +84,13 @@ internal class AssAtlasGlRenderer(
                 "Unable to create subtitle geometry buffers"
             }
             GlUtil.checkGlError()
-            if (isGles3) initializePbos()
+            if (isGles3 && AssAtlasUploadPolicy.shouldUsePbo(
+                    uploadMode,
+                    GLES20.glGetString(GLES20.GL_RENDERER).orEmpty(),
+                )
+            ) {
+                initializePbos()
+            }
             initialized = true
         } catch (error: Exception) {
             if (vertexBufferId != 0) {
@@ -103,6 +113,8 @@ internal class AssAtlasGlRenderer(
         sourceHeight: Int,
         targetWidth: Int,
         targetHeight: Int,
+        originX: Int = 0,
+        originY: Int = 0,
         forceRedraw: Boolean = false,
     ): DrawResult {
         check(initialized) { "AssAtlasGlRenderer.initialize() must be called first" }
@@ -117,26 +129,19 @@ internal class AssAtlasGlRenderer(
         }
 
         if (frame != null && frame.changed != AssAtlasFrame.CHANGE_NONE) {
-            if (!geometry.isValid(frame, sourceWidth, sourceHeight)) {
-                Log.w(TAG, "Ignoring malformed libass atlas geometry")
-                return DrawResult.UNCHANGED
+            if (!isFrameCompatible(frame, sourceWidth, sourceHeight)) {
+                return DrawResult.NEEDS_REPLACEMENT
             }
             when (frame.changed) {
-                AssAtlasFrame.CHANGE_CONTENT -> {
-                    if (!uploadPages(frame)) return DrawResult.UNCHANGED
+                AssAtlasFrame.CHANGE_REPLACE -> {
+                    if (!replacePages(frame)) return DrawResult.NEEDS_REPLACEMENT
                 }
 
-                AssAtlasFrame.CHANGE_POSITION -> {
-                    // An empty position-only frame means the subtitle moved fully
-                    // out of view. It can clear the target while keeping the old
-                    // atlas available for a later position-only frame.
-                    if (frame.quads.isNotEmpty() &&
-                        (!pageLayoutMatches(frame) || frame.contentSerial != uploadedContentSerial)
-                    ) {
-                        Log.w(TAG, "Ignoring position-only frame with a changed atlas layout")
-                        return DrawResult.UNCHANGED
-                    }
+                AssAtlasFrame.CHANGE_INCREMENTAL -> {
+                    if (!uploadPatches(frame)) return DrawResult.NEEDS_REPLACEMENT
                 }
+
+                AssAtlasFrame.CHANGE_METADATA -> Unit
 
                 else -> {
                     Log.w(TAG, "Ignoring unknown libass change state ${frame.changed}")
@@ -144,7 +149,7 @@ internal class AssAtlasGlRenderer(
                 }
             }
 
-            check(geometry.update(frame, sourceWidth, sourceHeight))
+            check(geometry.update(frame, targetWidth, targetHeight, originX, originY))
             uploadGeometry()
             hasContent = geometry.vertexCount > 0
         }
@@ -217,6 +222,22 @@ internal class AssAtlasGlRenderer(
         return DrawResult.REDRAWN_CONTENT
     }
 
+    fun isFrameCompatible(
+        frame: AssAtlasFrame,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): Boolean {
+        val validation = AssAtlasFrameValidator.validate(
+            frame = frame,
+            allowIncremental = supportsIncrementalUpdates,
+            uploadedContentSerial = uploadedContentSerial.takeIf { it != 0L },
+        )
+        val valid = validation is AssAtlasFrameValidator.ValidationResult.Valid &&
+            geometry.isValid(frame, sourceWidth, sourceHeight)
+        if (!valid) Log.w(TAG, "Ignoring incompatible libass atlas frame: $validation")
+        return valid
+    }
+
     fun clearCachedContent() {
         geometry.clear()
         hasContent = false
@@ -241,8 +262,6 @@ internal class AssAtlasGlRenderer(
         hasContent = false
         gpuVertexCapacityBytes = 0
         gpuIndexCapacityBytes = 0
-        uploadBuffer = null
-        uploadBufferCapacity = 0
         positionLocation = -1
         texCoordLocation = -1
         colorLocation = -1
@@ -250,7 +269,8 @@ internal class AssAtlasGlRenderer(
         initialized = false
     }
 
-    private fun uploadPages(frame: AssAtlasFrame): Boolean {
+    private fun replacePages(frame: AssAtlasFrame): Boolean {
+        val startedNs = System.nanoTime()
         val pages = frame.pages
         if (frame.quads.isNotEmpty() && pages == null) return false
         if (frame.pageWidths.size != frame.pageHeights.size) return false
@@ -282,8 +302,7 @@ internal class AssAtlasGlRenderer(
 
         val newWidths = frame.pageWidths.copyOf()
         val newHeights = frame.pageHeights.copyOf()
-        val dirtySequenceValid = uploadedContentSerial != 0L &&
-            frame.contentSerial == uploadedContentSerial + 1L
+        var uploadedBytes = 0L
         for (index in pages.indices) {
             val width = newWidths[index]
             val height = newHeights[index]
@@ -299,17 +318,10 @@ internal class AssAtlasGlRenderer(
                 textureIds[index] = texture
             } else {
                 if (isGles3) {
-                    val dirty = if (dirtySequenceValid) {
-                        dirtyRect(frame, index, width, height) ?: return false
-                    } else {
-                        DirtyRect(0, 0, width, height)
-                    }
-                    if (dirty.width > 0 && dirty.height > 0) {
-                        val buffer = prepareRegionBuffer(bytes, width, dirty)
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-                        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
-                        uploadGles3Region(dirty, buffer)
-                    }
+                    val rect = DirtyRect(0, 0, width, height)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+                    GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+                    uploadGles3Region(rect, bytes.duplicate().apply { clear(); limit(width * height) })
                 } else {
                     val buffer = bytes.duplicate().apply { clear(); limit(width * height) }
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
@@ -327,6 +339,7 @@ internal class AssAtlasGlRenderer(
                     )
                 }
             }
+            uploadedBytes += width.toLong() * height
         }
 
         while (textureIds.size > pages.size) {
@@ -339,6 +352,37 @@ internal class AssAtlasGlRenderer(
         textureHeights = newHeights
         uploadedContentSerial = frame.contentSerial
         GlUtil.checkGlError()
+        statsCollector?.recordGlUpload(uploadedBytes, System.nanoTime() - startedNs, 0L, 0L)
+        return true
+    }
+
+    private fun uploadPatches(frame: AssAtlasFrame): Boolean {
+        if (!isGles3 || !pageLayoutMatches(frame) ||
+            frame.baseContentSerial != uploadedContentSerial
+        ) return false
+        val patches = frame.patches ?: return false
+        val startedNs = System.nanoTime()
+        var uploadedBytes = 0L
+        patches.indices.forEach { patch ->
+            val offset = patch * AssAtlasFrame.PATCH_RECT_STRIDE
+            val page = frame.patchRects[offset]
+            val rect = DirtyRect(
+                left = frame.patchRects[offset + 1],
+                top = frame.patchRects[offset + 2],
+                width = frame.patchRects[offset + 3],
+                height = frame.patchRects[offset + 4],
+            )
+            val byteCount = rect.width * rect.height
+            val source = patches[patch].duplicate().apply { clear(); limit(byteCount) }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureIds[page])
+            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+            uploadGles3Region(rect, source)
+            uploadedBytes += byteCount
+        }
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        uploadedContentSerial = frame.contentSerial
+        GlUtil.checkGlError()
+        statsCollector?.recordGlUpload(uploadedBytes, System.nanoTime() - startedNs, 0L, 0L)
         return true
     }
 
@@ -446,39 +490,6 @@ internal class AssAtlasGlRenderer(
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GlUtil.checkGlError()
-    }
-
-    private fun prepareRegionBuffer(bytes: ByteBuffer, pageWidth: Int, rect: DirtyRect): ByteBuffer {
-        val required = rect.width * rect.height
-        if (uploadBuffer == null || uploadBufferCapacity < required) {
-            uploadBufferCapacity = nextPowerOfTwo(required.coerceAtLeast(1))
-            uploadBuffer = ByteBuffer.allocateDirect(uploadBufferCapacity)
-                .order(ByteOrder.nativeOrder())
-        }
-        return requireNotNull(uploadBuffer).apply {
-            clear()
-            val source = bytes.duplicate()
-            repeat(rect.height) { row ->
-                val offset = (rect.top + row) * pageWidth + rect.left
-                source.position(offset)
-                source.limit(offset + rect.width)
-                put(source)
-            }
-            flip()
-        }
-    }
-
-    private fun dirtyRect(frame: AssAtlasFrame, page: Int, width: Int, height: Int): DirtyRect? {
-        if (frame.dirtyRects.size != frame.pageWidths.size * 4) return null
-        val offset = page * 4
-        val left = frame.dirtyRects[offset]
-        val top = frame.dirtyRects[offset + 1]
-        val dirtyWidth = frame.dirtyRects[offset + 2]
-        val dirtyHeight = frame.dirtyRects[offset + 3]
-        if (left < 0 || top < 0 || dirtyWidth < 0 || dirtyHeight < 0 ||
-            left.toLong() + dirtyWidth > width || top.toLong() + dirtyHeight > height
-        ) return null
-        return DirtyRect(left, top, dirtyWidth, dirtyHeight)
     }
 
     private fun initializePbos() {
@@ -643,5 +654,13 @@ internal class AssAtlasGlRenderer(
                 gl_FragColor = vec4(v_Color.rgb * coverage, coverage);
             }
         """.trimIndent()
+    }
+}
+
+internal object AssAtlasUploadPolicy {
+    fun shouldUsePbo(mode: AssAtlasGlRenderer.UploadMode, renderer: String): Boolean = when (mode) {
+        AssAtlasGlRenderer.UploadMode.DIRECT -> false
+        AssAtlasGlRenderer.UploadMode.PBO -> true
+        AssAtlasGlRenderer.UploadMode.AUTO -> !renderer.contains("PowerVR Rogue GE9215", ignoreCase = true)
     }
 }

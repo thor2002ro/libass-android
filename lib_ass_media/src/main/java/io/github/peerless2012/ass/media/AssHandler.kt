@@ -324,12 +324,27 @@ class AssHandler(
         return frame
     }
 
-    internal fun renderAtlasFrame(timeMs: Long, maxAtlasSize: Int): AssAtlasFrame? {
+    internal fun renderAtlasFrame(
+        timeMs: Long,
+        maxAtlasSize: Int,
+        allowIncremental: Boolean = false,
+        forceReplacement: Boolean = false,
+    ): AssAtlasFrame? {
         val render = render ?: return null
         val stats = config.performanceStatsCollector
-            ?: return render.renderAtlasFrame(timeMs, maxAtlasSize)
+            ?: return render.renderAtlasFrame(
+                timeMs,
+                maxAtlasSize,
+                allowIncremental,
+                forceReplacement,
+            )
         val startedNs = System.nanoTime()
-        val frame = render.renderAtlasFrame(timeMs, maxAtlasSize)
+        val frame = render.renderAtlasFrame(
+            timeMs,
+            maxAtlasSize,
+            allowIncremental,
+            forceReplacement,
+        )
         stats.record(System.nanoTime() - startedNs, frame)
         return frame
     }

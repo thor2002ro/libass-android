@@ -9,6 +9,22 @@ import java.nio.ByteBuffer
 class AssPerformanceStatsRecorderTest {
 
     @Test
+    fun frameRateUsesOnlyTheLatestSecond() {
+        var nowNs = 0L
+        val recorder = AssPerformanceStatsRecorder(nowNs = { nowNs })
+
+        recorder.record(1L, AssFrame(null, 0))
+        nowNs = 200_000_000L
+        recorder.record(1L, AssFrame(null, 0))
+        nowNs = 400_000_000L
+        recorder.record(1L, AssFrame(null, 0))
+        assertEquals(3.0, recorder.snapshot().fps, 0.01)
+
+        nowNs = 1_500_000_000L
+        assertEquals(0.0, recorder.snapshot().fps, 0.01)
+    }
+
+    @Test
     fun recordsFrameRateAndRenderDurations() {
         var nowNs = 0L
         val recorder = AssPerformanceStatsRecorder(nowNs = { nowNs }, slowRenderThresholdMs = 2.0)
@@ -89,6 +105,36 @@ class AssPerformanceStatsRecorderTest {
     }
 
     @Test
+    fun recordsAtlasProtocolCopiesUploadsAndSurfaceSize() {
+        val collector = AssPerformanceStatsCollector()
+        collector.record(2_000_000, atlasFrame(AssAtlasFrame.CHANGE_METADATA, copiedBytes = 0L))
+        collector.record(3_000_000, atlasFrame(AssAtlasFrame.CHANGE_INCREMENTAL, copiedBytes = 48L))
+        collector.record(4_000_000, atlasFrame(AssAtlasFrame.CHANGE_REPLACE, copiedBytes = 2_048L))
+        collector.recordGlUpload(
+            uploadedBytes = 48L,
+            submissionDurationNs = 600_000L,
+            activeSurfacePixels = 800L,
+            allocatedSurfacePixels = 1_024L,
+        )
+        collector.recordGlUpload(
+            uploadedBytes = 2_048L,
+            submissionDurationNs = 1_400_000L,
+            activeSurfacePixels = 1_200L,
+            allocatedSurfacePixels = 2_048L,
+        )
+
+        val stats = collector.snapshot()
+        assertEquals(1L, stats.metadataReuseCount)
+        assertEquals(1L, stats.incrementalAtlasUpdateCount)
+        assertEquals(1L, stats.completeAtlasReplacementCount)
+        assertEquals(2_096L, stats.nativeCopiedMaskBytes)
+        assertEquals(2_096L, stats.glUploadedMaskBytes)
+        assertEquals(2.0, stats.glUploadSubmissionMs, 0.001)
+        assertEquals(1_200L, stats.activeSurfacePixels)
+        assertEquals(2_048L, stats.allocatedSurfacePixels)
+    }
+
+    @Test
     fun recordsEmptyChangedBitmapFrame() {
         val collector = AssPerformanceStatsCollector()
 
@@ -117,4 +163,23 @@ class AssPerformanceStatsRecorderTest {
 
     private fun testTex(width: Int, height: Int) =
         io.github.peerless2012.ass.AssTex(0, 0, width, height, 0)
+
+    private fun atlasFrame(changed: Int, copiedBytes: Long) = AssAtlasFrame(
+        pages = null,
+        pageWidths = intArrayOf(64),
+        pageHeights = intArrayOf(32),
+        quads = intArrayOf(0, 0, 8, 6, 0, 0, 0, 0),
+        changed = changed,
+        dirtyRects = IntArray(0),
+        contentSerial = 1L,
+        patches = if (changed == AssAtlasFrame.CHANGE_INCREMENTAL) {
+            arrayOf(ByteBuffer.allocateDirect(48))
+        } else null,
+        patchRects = if (changed == AssAtlasFrame.CHANGE_INCREMENTAL) {
+            intArrayOf(0, 0, 0, 8, 6)
+        } else IntArray(0),
+        activeBounds = intArrayOf(0, 0, 8, 6),
+        baseContentSerial = if (changed == AssAtlasFrame.CHANGE_INCREMENTAL) 0L else 1L,
+        copiedMaskBytes = copiedBytes,
+    )
 }

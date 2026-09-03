@@ -58,7 +58,13 @@ internal class AssAtlasVertexBuffer {
         return true
     }
 
-    fun update(frame: AssAtlasFrame, sourceWidth: Int, sourceHeight: Int): Boolean {
+    fun update(
+        frame: AssAtlasFrame,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        originX: Int = 0,
+        originY: Int = 0,
+    ): Boolean {
         if (!isValid(frame, sourceWidth, sourceHeight)) return false
         val imageCount = frame.imageCount
         vertexBytes = imageCount * VERTICES_PER_QUAD * VERTEX_STRIDE_BYTES
@@ -95,10 +101,12 @@ internal class AssAtlasVertexBuffer {
                 runCount++
             }
 
-            val x0 = (x.toDouble() * 2.0 / sourceWidth - 1.0).toFloat()
-            val x1 = ((x.toDouble() + width) * 2.0 / sourceWidth - 1.0).toFloat()
-            val y0 = (1.0 - y.toDouble() * 2.0 / sourceHeight).toFloat()
-            val y1 = (1.0 - (y.toDouble() + height) * 2.0 / sourceHeight).toFloat()
+            val relativeX = x - originX
+            val relativeY = y - originY
+            val x0 = (relativeX.toDouble() * 2.0 / sourceWidth - 1.0).toFloat()
+            val x1 = ((relativeX.toDouble() + width) * 2.0 / sourceWidth - 1.0).toFloat()
+            val y0 = (1.0 - relativeY.toDouble() * 2.0 / sourceHeight).toFloat()
+            val y1 = (1.0 - (relativeY.toDouble() + height) * 2.0 / sourceHeight).toFloat()
             val u0 = atlasX.toFloat() / pageWidth
             val u1 = (atlasX + width).toFloat() / pageWidth
             val v0 = atlasY.toFloat() / pageHeight

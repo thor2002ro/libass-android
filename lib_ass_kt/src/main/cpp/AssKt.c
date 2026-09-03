@@ -13,7 +13,12 @@
 
 #define LOG_TAG "SubtitleRenderer"
 #define ATLAS_QUAD_STRIDE 8
+#define ATLAS_ACTIVE_BOUNDS_STRIDE 4
+#define ATLAS_PATCH_RECT_STRIDE 5
 #define ATLAS_GUTTER 1
+#define ATLAS_CHANGE_METADATA 1
+#define ATLAS_CHANGE_INCREMENTAL 2
+#define ATLAS_CHANGE_REPLACE 3
 
 
 static jclass g_ass_event_class;
@@ -90,7 +95,7 @@ static int cache_jni_ids(JNIEnv *env) {
         env,
         g_ass_atlas_frame_class,
         "<init>",
-        "([Ljava/nio/ByteBuffer;[I[I[II[IJ)V"
+        "([Ljava/nio/ByteBuffer;[I[I[II[IJ[Ljava/nio/ByteBuffer;[I[IJJ)V"
     );
     g_bitmap_create = (*env)->GetStaticMethodID(
         env,
@@ -509,6 +514,8 @@ typedef struct AtlasWorkspace AtlasWorkspace;
 typedef struct NativeAssRender {
     ASS_Renderer *renderer;
     AtlasWorkspace *atlas;
+    int frame_width;
+    int frame_height;
 } NativeAssRender;
 
 static void free_atlas_workspace(AtlasWorkspace *workspace);
@@ -628,9 +635,19 @@ typedef struct DirectAtlasPage {
     size_t capacity;
 } DirectAtlasPage;
 
+typedef struct PreviousAtlasEntry {
+    int width;
+    int height;
+    int page;
+    int atlas_x;
+    int atlas_y;
+} PreviousAtlasEntry;
+
 typedef struct AtlasBufferSlot {
     DirectAtlasPage *pages;
     size_t page_capacity;
+    DirectAtlasPage *patches;
+    size_t patch_capacity;
 } AtlasBufferSlot;
 
 struct AtlasWorkspace {
@@ -640,15 +657,21 @@ struct AtlasWorkspace {
     jint *heights;
     jint *quads;
     jint *dirty_rects;
+    jint *patch_rects;
     size_t image_capacity;
+    size_t patch_metadata_capacity;
     size_t metadata_page_capacity;
     AtlasBufferSlot slots[ATLAS_BUFFER_SLOTS];
+    DirectAtlasPage *previous_masks;
+    size_t previous_mask_capacity;
     int next_slot;
-    int last_content_slot;
     int last_page_count;
     jint *last_widths;
     jint *last_heights;
     size_t last_page_capacity;
+    PreviousAtlasEntry *previous_entries;
+    size_t previous_entry_capacity;
+    int previous_entry_count;
     uint64_t content_serial;
 };
 
@@ -756,6 +779,53 @@ static int reserve_last_layout(AtlasWorkspace *workspace, size_t page_count) {
     return 1;
 }
 
+static int reserve_slot_patches(AtlasBufferSlot *slot, size_t patch_count) {
+    if (slot->patch_capacity >= patch_count) return 1;
+    size_t old_capacity = slot->patch_capacity;
+    size_t new_capacity = old_capacity > 0 ? old_capacity : 4;
+    while (new_capacity < patch_count) new_capacity *= 2;
+    DirectAtlasPage *patches = realloc(slot->patches, new_capacity * sizeof(DirectAtlasPage));
+    if (patches == NULL) return 0;
+    memset(patches + old_capacity, 0, (new_capacity - old_capacity) * sizeof(DirectAtlasPage));
+    slot->patches = patches;
+    slot->patch_capacity = new_capacity;
+    return 1;
+}
+
+static int reserve_previous_masks(AtlasWorkspace *workspace, size_t image_count) {
+    if (workspace->previous_mask_capacity >= image_count) return 1;
+    size_t old_capacity = workspace->previous_mask_capacity;
+    size_t new_capacity = old_capacity > 0 ? old_capacity : 4;
+    while (new_capacity < image_count) new_capacity *= 2;
+    DirectAtlasPage *masks = realloc(
+        workspace->previous_masks,
+        new_capacity * sizeof(DirectAtlasPage)
+    );
+    if (masks == NULL) return 0;
+    memset(masks + old_capacity, 0, (new_capacity - old_capacity) * sizeof(DirectAtlasPage));
+    workspace->previous_masks = masks;
+    workspace->previous_mask_capacity = new_capacity;
+    return 1;
+}
+
+static int reserve_previous_entries(AtlasWorkspace *workspace, size_t image_count) {
+    return reserve_array(
+        (void **) &workspace->previous_entries,
+        &workspace->previous_entry_capacity,
+        image_count,
+        sizeof(PreviousAtlasEntry)
+    );
+}
+
+static int reserve_patch_metadata(AtlasWorkspace *workspace, size_t patch_count) {
+    return reserve_array(
+        (void **) &workspace->patch_rects,
+        &workspace->patch_metadata_capacity,
+        patch_count * ATLAS_PATCH_RECT_STRIDE,
+        sizeof(jint)
+    );
+}
+
 static void free_atlas_workspace(AtlasWorkspace *workspace) {
     if (workspace == NULL) return;
     free(workspace->entries);
@@ -764,12 +834,20 @@ static void free_atlas_workspace(AtlasWorkspace *workspace) {
     free(workspace->heights);
     free(workspace->quads);
     free(workspace->dirty_rects);
+    free(workspace->patch_rects);
     free(workspace->last_widths);
     free(workspace->last_heights);
+    free(workspace->previous_entries);
+    for (size_t mask = 0; mask < workspace->previous_mask_capacity; ++mask) {
+        free(workspace->previous_masks[mask].bytes);
+    }
+    free(workspace->previous_masks);
     for (int slot_index = 0; slot_index < ATLAS_BUFFER_SLOTS; ++slot_index) {
         AtlasBufferSlot *slot = &workspace->slots[slot_index];
         for (size_t page = 0; page < slot->page_capacity; ++page) free(slot->pages[page].bytes);
+        for (size_t patch = 0; patch < slot->patch_capacity; ++patch) free(slot->patches[patch].bytes);
         free(slot->pages);
+        free(slot->patches);
     }
     free(workspace);
 }
@@ -823,6 +901,115 @@ static int count_renderable_images(const ASS_Image *images) {
         ++count;
     }
     return count;
+}
+
+static int is_previous_atlas_layout_compatible(
+    const AtlasWorkspace *workspace,
+    AtlasEntry *entries,
+    int count
+) {
+    if (workspace->previous_entry_count != count || workspace->last_page_count <= 0) return 0;
+    for (int i = 0; i < count; ++i) {
+        const ASS_Image *image = entries[i].image;
+        const PreviousAtlasEntry *previous = &workspace->previous_entries[i];
+        if (previous->width != image->w || previous->height != image->h) {
+            return 0;
+        }
+        entries[i].page = previous->page;
+        entries[i].atlas_x = previous->atlas_x;
+        entries[i].atlas_y = previous->atlas_y;
+    }
+    return 1;
+}
+
+static int is_previous_mask_identical(
+    const AtlasWorkspace *workspace,
+    const AtlasEntry *entry,
+    int index
+) {
+    const ASS_Image *image = entry->image;
+    if (index < 0 || index >= workspace->previous_entry_count) return 0;
+    const unsigned char *mask = workspace->previous_masks[index].bytes;
+    if (mask == NULL) return 0;
+    for (int y = 0; y < image->h; ++y) {
+        const unsigned char *previous = mask + (size_t) y * image->w;
+        const unsigned char *current = image->bitmap + (size_t) y * image->stride;
+        if (memcmp(previous, current, (size_t) image->w) != 0) return 0;
+    }
+    return 1;
+}
+
+static int are_uploaded_atlas_masks_identical(
+    const AtlasWorkspace *workspace,
+    const AtlasEntry *entries,
+    int count
+) {
+    for (int i = 0; i < count; ++i) {
+        if (!is_previous_mask_identical(workspace, &entries[i], i)) return 0;
+    }
+    return 1;
+}
+
+static void save_previous_entries(
+    AtlasWorkspace *workspace,
+    AtlasEntry *entries,
+    int count,
+    int save_masks
+) {
+    for (int i = 0; i < count; ++i) {
+        const ASS_Image *image = entries[i].image;
+        PreviousAtlasEntry *previous = &workspace->previous_entries[i];
+        previous->width = image->w;
+        previous->height = image->h;
+        previous->page = entries[i].page;
+        previous->atlas_x = entries[i].atlas_x;
+        previous->atlas_y = entries[i].atlas_y;
+        if (save_masks) {
+            unsigned char *mask = workspace->previous_masks[i].bytes;
+            for (int y = 0; y < image->h; ++y) {
+                memcpy(
+                    mask + (size_t) y * image->w,
+                    image->bitmap + (size_t) y * image->stride,
+                    (size_t) image->w
+                );
+            }
+        }
+    }
+    workspace->previous_entry_count = count;
+}
+
+static void compute_active_bounds(
+    const AtlasEntry *entries,
+    int count,
+    int frame_width,
+    int frame_height,
+    jint bounds[ATLAS_ACTIVE_BOUNDS_STRIDE]
+) {
+    bounds[0] = bounds[1] = bounds[2] = bounds[3] = 0;
+    if (frame_width <= 0 || frame_height <= 0 || count <= 0) return;
+    int left = frame_width;
+    int top = frame_height;
+    int right = 0;
+    int bottom = 0;
+    for (int i = 0; i < count; ++i) {
+        const ASS_Image *image = entries[i].image;
+        int64_t image_right = (int64_t) image->dst_x + image->w;
+        int64_t image_bottom = (int64_t) image->dst_y + image->h;
+        int x0 = image->dst_x < 0 ? 0 : image->dst_x;
+        int y0 = image->dst_y < 0 ? 0 : image->dst_y;
+        int x1 = image_right > frame_width ? frame_width : (int) image_right;
+        int y1 = image_bottom > frame_height ? frame_height : (int) image_bottom;
+        if (x0 >= x1 || y0 >= y1) continue;
+        if (x0 < left) left = x0;
+        if (y0 < top) top = y0;
+        if (x1 > right) right = x1;
+        if (y1 > bottom) bottom = y1;
+    }
+    if (left >= right || top >= bottom) return;
+    bounds[0] = left;
+    bounds[1] = top;
+    bounds[2] = right - left;
+    bounds[3] = bottom - top;
 }
 
 static int choose_atlas_width(
@@ -923,11 +1110,16 @@ static jobject new_empty_atlas_frame(JNIEnv *env, int changed, uint64_t content_
     jintArray heights = (*env)->NewIntArray(env, 0);
     jintArray quads = (*env)->NewIntArray(env, 0);
     jintArray dirty_rects = (*env)->NewIntArray(env, 0);
-    if (widths == NULL || heights == NULL || quads == NULL || dirty_rects == NULL) {
+    jintArray patch_rects = (*env)->NewIntArray(env, 0);
+    jintArray active_bounds = (*env)->NewIntArray(env, 0);
+    if (widths == NULL || heights == NULL || quads == NULL || dirty_rects == NULL ||
+        patch_rects == NULL || active_bounds == NULL) {
         if (widths != NULL) (*env)->DeleteLocalRef(env, widths);
         if (heights != NULL) (*env)->DeleteLocalRef(env, heights);
         if (quads != NULL) (*env)->DeleteLocalRef(env, quads);
         if (dirty_rects != NULL) (*env)->DeleteLocalRef(env, dirty_rects);
+        if (patch_rects != NULL) (*env)->DeleteLocalRef(env, patch_rects);
+        if (active_bounds != NULL) (*env)->DeleteLocalRef(env, active_bounds);
         return NULL;
     }
 
@@ -941,12 +1133,19 @@ static jobject new_empty_atlas_frame(JNIEnv *env, int changed, uint64_t content_
         quads,
         changed,
         dirty_rects,
-        (jlong) content_serial
+        (jlong) content_serial,
+        NULL,
+        patch_rects,
+        active_bounds,
+        (jlong) content_serial,
+        (jlong) 0
     );
     (*env)->DeleteLocalRef(env, widths);
     (*env)->DeleteLocalRef(env, heights);
     (*env)->DeleteLocalRef(env, quads);
     (*env)->DeleteLocalRef(env, dirty_rects);
+    (*env)->DeleteLocalRef(env, patch_rects);
+    (*env)->DeleteLocalRef(env, active_bounds);
     return frame;
 }
 
@@ -956,7 +1155,9 @@ static jobject nativeAssRenderAtlasFrame(
     jlong render,
     jlong track,
     jlong time,
-    jint max_atlas_size
+    jint max_atlas_size,
+    jboolean allow_incremental,
+    jboolean force_replacement
 ) {
     (void) clazz;
     if (render == 0 || track == 0 || max_atlas_size <= 0) return NULL;
@@ -965,7 +1166,6 @@ static jobject nativeAssRenderAtlasFrame(
     if (native->atlas == NULL) {
         native->atlas = calloc(1, sizeof(AtlasWorkspace));
         if (native->atlas == NULL) return NULL;
-        native->atlas->last_content_slot = -1;
     }
     AtlasWorkspace *workspace = native->atlas;
 
@@ -978,12 +1178,14 @@ static jobject nativeAssRenderAtlasFrame(
     );
 
     // Null is the zero-allocation unchanged sentinel for the atlas API.
-    if (changed == 0) return NULL;
+    if (changed == 0 && !force_replacement) return NULL;
 
     int count = count_renderable_images(images);
     if (count == 0) {
-        if (changed >= 2) workspace->content_serial++;
-        return new_empty_atlas_frame(env, changed, workspace->content_serial);
+        workspace->content_serial++;
+        workspace->previous_entry_count = 0;
+        workspace->last_page_count = 0;
+        return new_empty_atlas_frame(env, ATLAS_CHANGE_REPLACE, workspace->content_serial);
     }
     if (count < 0 || count > INT_MAX / ATLAS_QUAD_STRIDE) return NULL;
     if ((size_t) count > SIZE_MAX / sizeof(AtlasEntry) ||
@@ -999,8 +1201,16 @@ static jobject nativeAssRenderAtlasFrame(
     jintArray page_heights = NULL;
     jintArray quads = NULL;
     jintArray dirty_rects = NULL;
+    jintArray patch_rects = NULL;
+    jintArray active_bounds = NULL;
     jobjectArray page_arrays = NULL;
-    if (!reserve_workspace(workspace, (size_t) count)) goto cleanup;
+    jobjectArray patch_arrays = NULL;
+    jlong copied_mask_bytes = 0;
+    uint64_t base_content_serial = workspace->content_serial;
+    uint64_t result_content_serial = base_content_serial;
+    int patch_count = 0;
+    if (!reserve_workspace(workspace, (size_t) count) ||
+        !reserve_previous_entries(workspace, (size_t) count)) goto cleanup;
     entries = workspace->entries;
     pages = workspace->layout_pages;
     memset(entries, 0, (size_t) count * sizeof(AtlasEntry));
@@ -1016,26 +1226,59 @@ static jobject nativeAssRenderAtlasFrame(
         if (image->w <= max_atlas_size - 2) entry->padded_width += 2;
         if (image->h <= max_atlas_size - 2) entry->padded_height += 2;
     }
+    if (!reserve_previous_masks(workspace, (size_t) count)) goto cleanup;
+    for (int i = 0; i < count; ++i) {
+        const ASS_Image *image = entries[i].image;
+        if ((size_t) image->w > SIZE_MAX / (size_t) image->h ||
+            !reserve_direct_page(
+                &workspace->previous_masks[i],
+                (size_t) image->w * (size_t) image->h
+            )) {
+            goto cleanup;
+        }
+    }
 
-    int packing_width = choose_atlas_width(entries, count, max_atlas_size);
-    int page_count = layout_atlas(
-        entries,
-        count,
-        pages,
-        count,
-        packing_width,
-        max_atlas_size
-    );
-    if (page_count < 0 && packing_width < max_atlas_size) {
-        memset(pages, 0, (size_t) count * sizeof(AtlasPage));
+    int reused_layout = is_previous_atlas_layout_compatible(workspace, entries, count);
+    int reused_masks = !force_replacement && reused_layout &&
+        (changed == 1 || are_uploaded_atlas_masks_identical(workspace, entries, count));
+    int page_count = workspace->last_page_count;
+    int output_change = ATLAS_CHANGE_METADATA;
+    if (reused_masks) {
+        for (int page = 0; page < page_count; ++page) {
+            pages[page].width = workspace->last_widths[page];
+            pages[page].height = workspace->last_heights[page];
+        }
+    } else if (!force_replacement && reused_layout && allow_incremental) {
+        output_change = ATLAS_CHANGE_INCREMENTAL;
+        for (int page = 0; page < page_count; ++page) {
+            pages[page].width = workspace->last_widths[page];
+            pages[page].height = workspace->last_heights[page];
+        }
+        for (int i = 0; i < count; ++i) {
+            if (!is_previous_mask_identical(workspace, &entries[i], i)) ++patch_count;
+        }
+    } else {
+        output_change = ATLAS_CHANGE_REPLACE;
+        int packing_width = choose_atlas_width(entries, count, max_atlas_size);
         page_count = layout_atlas(
             entries,
             count,
             pages,
             count,
-            max_atlas_size,
+            packing_width,
             max_atlas_size
         );
+        if (page_count < 0 && packing_width < max_atlas_size) {
+            memset(pages, 0, (size_t) count * sizeof(AtlasPage));
+            page_count = layout_atlas(
+                entries,
+                count,
+                pages,
+                count,
+                max_atlas_size,
+                max_atlas_size
+            );
+        }
     }
     if (page_count <= 0) {
         __android_log_print(
@@ -1050,7 +1293,10 @@ static jobject nativeAssRenderAtlasFrame(
     page_heights = (*env)->NewIntArray(env, page_count);
     quads = (*env)->NewIntArray(env, count * ATLAS_QUAD_STRIDE);
     dirty_rects = (*env)->NewIntArray(env, page_count * 4);
-    if (page_widths == NULL || page_heights == NULL || quads == NULL || dirty_rects == NULL) {
+    patch_rects = (*env)->NewIntArray(env, patch_count * ATLAS_PATCH_RECT_STRIDE);
+    active_bounds = (*env)->NewIntArray(env, ATLAS_ACTIVE_BOUNDS_STRIDE);
+    if (page_widths == NULL || page_heights == NULL || quads == NULL || dirty_rects == NULL ||
+        patch_rects == NULL || active_bounds == NULL) {
         goto cleanup;
     }
     if (!reserve_page_metadata(workspace, (size_t) page_count)) goto cleanup;
@@ -1079,10 +1325,73 @@ static jobject nativeAssRenderAtlasFrame(
     (*env)->SetIntArrayRegion(env, page_widths, 0, page_count, width_values);
     (*env)->SetIntArrayRegion(env, page_heights, 0, page_count, height_values);
     (*env)->SetIntArrayRegion(env, quads, 0, count * ATLAS_QUAD_STRIDE, quad_values);
+    jint active_values[ATLAS_ACTIVE_BOUNDS_STRIDE];
+    compute_active_bounds(
+        entries,
+        count,
+        native->frame_width,
+        native->frame_height,
+        active_values
+    );
+    (*env)->SetIntArrayRegion(
+        env,
+        active_bounds,
+        0,
+        ATLAS_ACTIVE_BOUNDS_STRIDE,
+        active_values
+    );
     if ((*env)->ExceptionCheck(env)) goto cleanup;
 
-    if (changed >= 2) {
-        workspace->content_serial++;
+    if (output_change == ATLAS_CHANGE_INCREMENTAL) {
+        if (base_content_serial == UINT64_MAX || patch_count <= 0) goto cleanup;
+        result_content_serial = base_content_serial + 1;
+        int slot_index = workspace->next_slot;
+        workspace->next_slot = (slot_index + 1) % ATLAS_BUFFER_SLOTS;
+        AtlasBufferSlot *patch_slot = &workspace->slots[slot_index];
+        if (!reserve_slot_patches(patch_slot, (size_t) patch_count) ||
+            !reserve_patch_metadata(workspace, (size_t) patch_count)) goto cleanup;
+        patch_arrays = (*env)->NewObjectArray(env, patch_count, g_byte_buffer_class, NULL);
+        if (patch_arrays == NULL) goto cleanup;
+
+        int patch_index = 0;
+        for (int i = 0; i < count; ++i) {
+            AtlasEntry *entry = &entries[i];
+            if (is_previous_mask_identical(workspace, entry, i)) continue;
+            const ASS_Image *image = entry->image;
+            size_t byte_count = (size_t) image->w * (size_t) image->h;
+            if (byte_count > INT_MAX) goto cleanup;
+            DirectAtlasPage *direct_patch = &patch_slot->patches[patch_index];
+            if (!reserve_direct_page(direct_patch, byte_count)) goto cleanup;
+            unsigned char *patch_bytes = direct_patch->bytes;
+            for (int y = 0; y < image->h; ++y) {
+                const unsigned char *src = image->bitmap + (size_t) y * image->stride;
+                memcpy(patch_bytes + (size_t) y * image->w, src, (size_t) image->w);
+            }
+            copied_mask_bytes += (jlong) byte_count;
+            int rect_offset = patch_index * ATLAS_PATCH_RECT_STRIDE;
+            workspace->patch_rects[rect_offset + 0] = entry->page;
+            workspace->patch_rects[rect_offset + 1] = entry->atlas_x;
+            workspace->patch_rects[rect_offset + 2] = entry->atlas_y;
+            workspace->patch_rects[rect_offset + 3] = image->w;
+            workspace->patch_rects[rect_offset + 4] = image->h;
+            jobject patch_buffer = (*env)->NewDirectByteBuffer(env, patch_bytes, (jlong) byte_count);
+            if (patch_buffer == NULL) goto cleanup;
+            (*env)->SetObjectArrayElement(env, patch_arrays, patch_index, patch_buffer);
+            (*env)->DeleteLocalRef(env, patch_buffer);
+            if ((*env)->ExceptionCheck(env)) goto cleanup;
+            ++patch_index;
+        }
+        (*env)->SetIntArrayRegion(
+            env,
+            patch_rects,
+            0,
+            patch_count * ATLAS_PATCH_RECT_STRIDE,
+            workspace->patch_rects
+        );
+        if ((*env)->ExceptionCheck(env)) goto cleanup;
+    } else if (output_change == ATLAS_CHANGE_REPLACE) {
+        if (base_content_serial == UINT64_MAX) goto cleanup;
+        result_content_serial = base_content_serial + 1;
         int slot_index = workspace->next_slot;
         workspace->next_slot = (slot_index + 1) % ATLAS_BUFFER_SLOTS;
         AtlasBufferSlot *slot = &workspace->slots[slot_index];
@@ -1108,6 +1417,7 @@ static jobject nativeAssRenderAtlasFrame(
                 const AtlasEntry *entry = &entries[i];
                 if (entry->page != page_index) continue;
                 const ASS_Image *image = entry->image;
+                copied_mask_bytes += (jlong) image->w * image->h;
                 for (int y = 0; y < image->h; ++y) {
                     unsigned char *dst = (unsigned char *) page_bytes +
                         (size_t) (entry->atlas_y + y) * (size_t) width + entry->atlas_x;
@@ -1116,39 +1426,11 @@ static jobject nativeAssRenderAtlasFrame(
                 }
             }
 
-            int dirty_left = 0;
-            int dirty_top = 0;
-            int dirty_right = width - 1;
-            int dirty_bottom = height - 1;
-            int previous_slot_index = workspace->last_content_slot;
-            if (previous_slot_index >= 0 && workspace->last_page_count == page_count &&
-                workspace->last_widths[page_index] == width &&
-                workspace->last_heights[page_index] == height) {
-                const unsigned char *previous =
-                    workspace->slots[previous_slot_index].pages[page_index].bytes;
-                dirty_left = width;
-                dirty_top = height;
-                dirty_right = -1;
-                dirty_bottom = -1;
-                for (int y = 0; y < height; ++y) {
-                    size_t row = (size_t) y * (size_t) width;
-                    for (int x = 0; x < width; ++x) {
-                        size_t offset = row + (size_t) x;
-                        if (previous[offset] == page_bytes[offset]) continue;
-                        if (x < dirty_left) dirty_left = x;
-                        if (x > dirty_right) dirty_right = x;
-                        if (y < dirty_top) dirty_top = y;
-                        if (y > dirty_bottom) dirty_bottom = y;
-                    }
-                }
-            }
             int dirty_offset = page_index * 4;
-            workspace->dirty_rects[dirty_offset + 0] = dirty_left;
-            workspace->dirty_rects[dirty_offset + 1] = dirty_top;
-            workspace->dirty_rects[dirty_offset + 2] =
-                dirty_right >= dirty_left ? dirty_right - dirty_left + 1 : 0;
-            workspace->dirty_rects[dirty_offset + 3] =
-                dirty_bottom >= dirty_top ? dirty_bottom - dirty_top + 1 : 0;
+            workspace->dirty_rects[dirty_offset + 0] = 0;
+            workspace->dirty_rects[dirty_offset + 1] = 0;
+            workspace->dirty_rects[dirty_offset + 2] = width;
+            workspace->dirty_rects[dirty_offset + 3] = height;
 
             jobject page_buffer = (*env)->NewDirectByteBuffer(env, page_bytes, (jlong) byte_count);
             if (page_buffer == NULL) goto cleanup;
@@ -1159,10 +1441,6 @@ static jobject nativeAssRenderAtlasFrame(
 
         (*env)->SetIntArrayRegion(env, dirty_rects, 0, page_count * 4, workspace->dirty_rects);
         if ((*env)->ExceptionCheck(env)) goto cleanup;
-        memcpy(workspace->last_widths, width_values, (size_t) page_count * sizeof(jint));
-        memcpy(workspace->last_heights, height_values, (size_t) page_count * sizeof(jint));
-        workspace->last_page_count = page_count;
-        workspace->last_content_slot = slot_index;
     }
 
     result = (*env)->NewObject(
@@ -1173,17 +1451,41 @@ static jobject nativeAssRenderAtlasFrame(
         page_widths,
         page_heights,
         quads,
-        changed,
+        output_change,
         dirty_rects,
-        (jlong) workspace->content_serial
+        (jlong) result_content_serial,
+        patch_arrays,
+        patch_rects,
+        active_bounds,
+        (jlong) base_content_serial,
+        copied_mask_bytes
     );
+    if (result != NULL) {
+        if (output_change == ATLAS_CHANGE_REPLACE) {
+            memcpy(workspace->last_widths, width_values, (size_t) page_count * sizeof(jint));
+            memcpy(workspace->last_heights, height_values, (size_t) page_count * sizeof(jint));
+            workspace->last_page_count = page_count;
+            workspace->content_serial = result_content_serial;
+        } else if (output_change == ATLAS_CHANGE_INCREMENTAL) {
+            workspace->content_serial = result_content_serial;
+        }
+        save_previous_entries(
+            workspace,
+            entries,
+            count,
+            output_change != ATLAS_CHANGE_METADATA
+        );
+    }
 
 cleanup:
     if (page_arrays != NULL) (*env)->DeleteLocalRef(env, page_arrays);
+    if (patch_arrays != NULL) (*env)->DeleteLocalRef(env, patch_arrays);
     if (page_widths != NULL) (*env)->DeleteLocalRef(env, page_widths);
     if (page_heights != NULL) (*env)->DeleteLocalRef(env, page_heights);
     if (quads != NULL) (*env)->DeleteLocalRef(env, quads);
     if (dirty_rects != NULL) (*env)->DeleteLocalRef(env, dirty_rects);
+    if (patch_rects != NULL) (*env)->DeleteLocalRef(env, patch_rects);
+    if (active_bounds != NULL) (*env)->DeleteLocalRef(env, active_bounds);
     return result;
 }
 
@@ -1236,8 +1538,12 @@ static void nativeAssRenderSetFrameSize(
 ) {
     (void) env;
     (void) clazz;
-    ASS_Renderer *renderer = ass_renderer(render);
-    if (renderer != NULL) ass_set_frame_size(renderer, width, height);
+    NativeAssRender *native = native_ass_render(render);
+    if (native != NULL && native->renderer != NULL) {
+        native->frame_width = width;
+        native->frame_height = height;
+        ass_set_frame_size(native->renderer, width, height);
+    }
 }
 
 static void nativeAssRenderSetStorageSize(
@@ -1283,7 +1589,7 @@ static JNINativeMethod render_method_table[] = {
     {"nativeAssRenderSetFrameSize", "(JII)V", (void *) nativeAssRenderSetFrameSize},
     {"nativeAssRenderSetPixelAspect", "(JD)V", (void *) nativeAssRenderSetPixelAspect},
     {"nativeAssRenderFrame", "(JJJI)Lio/github/peerless2012/ass/AssFrame;", (void *) nativeAssRenderFrame},
-    {"nativeAssRenderAtlasFrame", "(JJJI)Lio/github/peerless2012/ass/AssAtlasFrame;", (void *) nativeAssRenderAtlasFrame},
+    {"nativeAssRenderAtlasFrame", "(JJJIZZ)Lio/github/peerless2012/ass/AssAtlasFrame;", (void *) nativeAssRenderAtlasFrame},
     {"nativeAssRenderDeinit", "(J)V", (void *) nativeAssRenderDeinit},
 };
 

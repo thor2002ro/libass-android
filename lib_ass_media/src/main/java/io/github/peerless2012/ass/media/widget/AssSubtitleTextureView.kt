@@ -18,6 +18,7 @@ import androidx.media3.common.C
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
+import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.AssRender
 import io.github.peerless2012.ass.media.AssHandler
 import io.github.peerless2012.ass.media.executor.AssAtlasExecutor
@@ -243,6 +244,8 @@ class AssSubtitleTextureView :
         private var renderSize = Size.ZERO
         private var maxAtlasSize = 2_048
         private var forceNextRender = true
+        @Volatile
+        private var forceReplacement = true
 
         private var atlasRenderer: AssAtlasGlRenderer? = null
         private var executor: AssAtlasExecutor? = null
@@ -262,6 +265,7 @@ class AssSubtitleTextureView :
                 it.initialize()
             }
             forceNextRender = true
+            forceReplacement = true
         }
 
         override fun onSurfaceChanged(width: Int, height: Int) {
@@ -275,6 +279,7 @@ class AssSubtitleTextureView :
             replaceExecutor(assHandler.render)
             atlasRenderer?.clearCachedContent()
             forceNextRender = true
+            forceReplacement = true
         }
 
         override fun onDrawFrame(presentationTimeUs: Long): Boolean {
@@ -284,6 +289,7 @@ class AssSubtitleTextureView :
                 atlasRenderer?.clearCachedContent()
                 activeRender?.setFrameSize(renderSize.width, renderSize.height)
                 forceNextRender = true
+                forceReplacement = true
             }
 
             val force = forceNextRender
@@ -297,6 +303,28 @@ class AssSubtitleTextureView :
                 targetHeight = surfaceSize.height,
                 forceRedraw = force,
             ) ?: AssAtlasGlRenderer.DrawResult.UNCHANGED
+            if (result == AssAtlasGlRenderer.DrawResult.NEEDS_REPLACEMENT) {
+                forceReplacement = true
+                forceNextRender = true
+                return false
+            }
+            if (frame?.changed == AssAtlasFrame.CHANGE_REPLACE) {
+                forceReplacement = false
+            }
+            if (result == AssAtlasGlRenderer.DrawResult.REDRAWN_CONTENT ||
+                result == AssAtlasGlRenderer.DrawResult.REDRAWN_EMPTY
+            ) {
+                val activePixels = frame?.activeBounds?.takeIf { it.size == 4 }?.let {
+                    it[2].toLong().coerceAtLeast(0L) * it[3].toLong().coerceAtLeast(0L)
+                } ?: 0L
+                assHandler.config.performanceStatsCollector?.recordGlUpload(
+                    uploadedBytes = 0L,
+                    submissionDurationNs = 0L,
+                    activeSurfacePixels = activePixels,
+                    allocatedSurfacePixels = surfaceSize.width.toLong().coerceAtLeast(0L) *
+                        surfaceSize.height.toLong().coerceAtLeast(0L),
+                )
+            }
             return result != AssAtlasGlRenderer.DrawResult.UNCHANGED
         }
 
@@ -312,7 +340,14 @@ class AssSubtitleTextureView :
             executor?.shutdown()
             executor = render?.let {
                 AssAtlasExecutor(
-                    frameRenderer = { timeMs -> assHandler.renderAtlasFrame(timeMs, maxAtlasSize) },
+                    frameRenderer = { timeMs ->
+                        assHandler.renderAtlasFrame(
+                            timeMs,
+                            maxAtlasSize,
+                            atlasRenderer?.supportsIncrementalUpdates == true,
+                            forceReplacement,
+                        )
+                    },
                     statsCollector = assHandler.config.performanceStatsCollector,
                 )
             }
