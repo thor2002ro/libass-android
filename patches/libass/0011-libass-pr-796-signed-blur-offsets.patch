@@ -66,7 +66,7 @@ index 921b62de1..87680ccb9 100644
              int32_t acc[STRIPE_WIDTH];
              for (int k = 0; k < STRIPE_WIDTH; k++)
 diff --git a/libass/c/c_blur.c b/libass/c/c_blur.c
-index 2c470f787..fdc45435a 100644
+index 2c470f787..4e7ccb3ae 100644
 --- a/libass/c/c_blur.c
 +++ b/libass/c/c_blur.c
 @@ -30,9 +30,9 @@ static int16_t dither_line[32] = {
@@ -77,7 +77,7 @@ index 2c470f787..fdc45435a 100644
 +inline static const int16_t *get_line(const int16_t *ptr, ptrdiff_t offs, size_t size)
  {
 -    return offs < size ? ptr + offs : zero_line;
-+    return (offs >= 0 && (size_t)offs < size) ? ptr + offs : zero_line;
++    return (size_t) offs < size ? ptr + offs : zero_line;
  }
  
  static inline int16_t shrink_func(int16_t p1p, int16_t p1n,

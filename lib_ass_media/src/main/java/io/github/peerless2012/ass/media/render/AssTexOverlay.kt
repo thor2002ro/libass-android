@@ -85,6 +85,7 @@ class AssTexOverlay(
                 targetHeight = layout.capacity.height,
                 originX = layout.originX,
                 originY = layout.originY,
+                frameValidated = true,
             )
             if (result == AssAtlasGlRenderer.DrawResult.UNCHANGED) {
                 return outputTextureId

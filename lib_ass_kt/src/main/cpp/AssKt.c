@@ -654,6 +654,7 @@ typedef struct AtlasBufferSlot {
 struct AtlasWorkspace {
     AtlasEntry *entries;
     AtlasPage *layout_pages;
+    int *changed_indices;
     jint *widths;
     jint *heights;
     jint *quads;
@@ -698,13 +699,16 @@ static int reserve_workspace(AtlasWorkspace *workspace, size_t image_count) {
         return 0;
     }
     AtlasPage *pages = realloc(workspace->layout_pages, capacity * sizeof(AtlasPage));
+    int *changed_indices = realloc(workspace->changed_indices, capacity * sizeof(int));
     jint *quads = realloc(workspace->quads, capacity * ATLAS_QUAD_STRIDE * sizeof(jint));
-    if (pages == NULL || quads == NULL) {
+    if (pages == NULL || changed_indices == NULL || quads == NULL) {
         if (pages != NULL) workspace->layout_pages = pages;
+        if (changed_indices != NULL) workspace->changed_indices = changed_indices;
         if (quads != NULL) workspace->quads = quads;
         return 0;
     }
     workspace->layout_pages = pages;
+    workspace->changed_indices = changed_indices;
     workspace->quads = quads;
     workspace->image_capacity = capacity;
     return 1;
@@ -817,6 +821,7 @@ static void free_atlas_workspace(AtlasWorkspace *workspace) {
     if (workspace == NULL) return;
     free(workspace->entries);
     free(workspace->layout_pages);
+    free(workspace->changed_indices);
     free(workspace->widths);
     free(workspace->heights);
     free(workspace->quads);
@@ -929,6 +934,20 @@ static int are_uploaded_atlas_masks_identical(
         if (!is_previous_mask_identical(workspace, &entries[i], i)) return 0;
     }
     return 1;
+}
+
+static int collect_changed_mask_indices(
+    AtlasWorkspace *workspace,
+    const AtlasEntry *entries,
+    int count
+) {
+    int changed_count = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!is_previous_mask_identical(workspace, &entries[i], i)) {
+            workspace->changed_indices[changed_count++] = i;
+        }
+    }
+    return changed_count;
 }
 
 static void save_previous_entries(
@@ -1211,8 +1230,14 @@ static jobject nativeAssRenderAtlasFrame(
     }
 
     int reused_layout = is_previous_atlas_layout_compatible(workspace, entries, count);
+    int changed_mask_count = -1;
+    if (!force_replacement && reused_layout && changed != 1) {
+        changed_mask_count = allow_incremental ?
+            collect_changed_mask_indices(workspace, entries, count) :
+            (are_uploaded_atlas_masks_identical(workspace, entries, count) ? 0 : -1);
+    }
     int reused_masks = !force_replacement && reused_layout &&
-        (changed == 1 || are_uploaded_atlas_masks_identical(workspace, entries, count));
+        (changed == 1 || changed_mask_count == 0);
     int page_count = workspace->last_page_count;
     int output_change = ATLAS_CHANGE_METADATA;
     if (reused_masks) {
@@ -1226,9 +1251,7 @@ static jobject nativeAssRenderAtlasFrame(
             pages[page].width = workspace->last_widths[page];
             pages[page].height = workspace->last_heights[page];
         }
-        for (int i = 0; i < count; ++i) {
-            if (!is_previous_mask_identical(workspace, &entries[i], i)) ++patch_count;
-        }
+        patch_count = changed_mask_count;
     } else {
         output_change = ATLAS_CHANGE_REPLACE;
         int packing_width = choose_atlas_width(entries, count, max_atlas_size);
@@ -1327,8 +1350,8 @@ static jobject nativeAssRenderAtlasFrame(
                 !checked_add_size(payload_bytes, page_bytes, &payload_bytes)) goto cleanup;
         }
     } else if (output_change == ATLAS_CHANGE_INCREMENTAL) {
-        for (int i = 0; i < count; ++i) {
-            if (is_previous_mask_identical(workspace, &entries[i], i)) continue;
+        for (int patch = 0; patch < patch_count; ++patch) {
+            int i = workspace->changed_indices[patch];
             size_t patch_bytes;
             if (!checked_mul_size(
                     (size_t) entries[i].image->w,
@@ -1383,10 +1406,9 @@ static jobject nativeAssRenderAtlasFrame(
 
     size_t payload_cursor = payload_offset;
     if (output_change == ATLAS_CHANGE_INCREMENTAL) {
-        int patch_index = 0;
-        for (int i = 0; i < count; ++i) {
+        for (int patch_index = 0; patch_index < patch_count; ++patch_index) {
+            int i = workspace->changed_indices[patch_index];
             AtlasEntry *entry = &entries[i];
-            if (is_previous_mask_identical(workspace, entry, i)) continue;
             const ASS_Image *image = entry->image;
             size_t byte_count = (size_t) image->w * (size_t) image->h;
             size_t record = patch_records_offset + (size_t) patch_index * ATLAS_PATCH_RECORD_SIZE;
@@ -1403,9 +1425,7 @@ static jobject nativeAssRenderAtlasFrame(
             }
             payload_cursor += byte_count;
             copied_mask_bytes += byte_count;
-            ++patch_index;
         }
-        if (patch_index != patch_count) goto cleanup;
     } else if (output_change == ATLAS_CHANGE_REPLACE) {
         for (int page_index = 0; page_index < page_count; ++page_index) {
             int width = pages[page_index].width;

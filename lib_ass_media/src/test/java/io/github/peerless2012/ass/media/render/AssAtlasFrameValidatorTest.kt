@@ -9,6 +9,31 @@ import java.nio.ByteOrder
 class AssAtlasFrameValidatorTest {
 
     @Test
+    fun rejectsFrameBeyondUnsignedShortQuadCapacity() {
+        val quadCount = 16_384
+        val quads = IntArray(quadCount * AssAtlasFrame.QUAD_STRIDE)
+        repeat(quadCount) { index ->
+            val offset = index * AssAtlasFrame.QUAD_STRIDE
+            quads[offset + AssAtlasFrame.QUAD_WIDTH] = 1
+            quads[offset + AssAtlasFrame.QUAD_HEIGHT] = 1
+        }
+        val result = AssAtlasFrameValidator.validate(
+            frame = AssAtlasFrame(
+                pages = arrayOf(ByteBuffer.allocateDirect(1)),
+                pageWidths = intArrayOf(1),
+                pageHeights = intArrayOf(1),
+                quads = quads,
+                changed = AssAtlasFrame.CHANGE_REPLACE,
+                dirtyRects = IntArray(0),
+                contentSerial = 1L,
+            ),
+            allowIncremental = true,
+        )
+
+        assertTrue(result is AssAtlasFrameValidator.ValidationResult.Invalid)
+    }
+
+    @Test
     fun rejectsPacketWithInvalidHeaderBeforeReadingRecords() {
         val packet = ByteBuffer.allocateDirect(AssAtlasFrame.HEADER_SIZE)
             .order(ByteOrder.nativeOrder())
