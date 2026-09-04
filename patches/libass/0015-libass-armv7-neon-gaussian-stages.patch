@@ -1,5 +1,5 @@
 diff --git a/checkasm/blur.c b/checkasm/blur.c
-index bd5a9f37df9e85df26660ee537ba883da1e185b5..58082f127b9c4c34f39f16f1ed55ab65e84d7fcf 100644
+index bd5a9f37df9e85df26660ee537ba883da1e185b5..cbd219548b39a9e2243815a9dea6e8924b5297e2 100644
 --- a/checkasm/blur.c
 +++ b/checkasm/blur.c
 @@ -27,6 +27,31 @@
@@ -70,57 +70,111 @@ index bd5a9f37df9e85df26660ee537ba883da1e185b5..58082f127b9c4c34f39f16f1ed55ab65
              }
          }
  
-@@ -99,11 +125,14 @@ static void check_stripe_pack(Convert16to8Func func, const char *name, int align
+@@ -99,34 +125,92 @@ static void check_stripe_pack(Convert16to8Func func, const char *name, int align
  
  static void check_fixed_filter(FilterFunc func, const char *name, int align)
  {
 -    enum { PADDING = FFMAX(32 * HEIGHT, 4 * STRIDE) };
 +    enum {
 +        FIXED_HEIGHT = 64,
-+        PADDING = FFMAX(32 * FIXED_HEIGHT, 4 * STRIDE),
++        MAX_WIDTH = 512,
++        MAX_HEIGHT = 288,
++        PADDING = FFMAX(32 * MAX_HEIGHT, 4 * MAX_WIDTH),
++    };
++    static const struct {
++        size_t width, height;
++    } heavy_cases[] = {
++        {  96,  54 },
++        { 128,  72 },
++        { 192, 108 },
++        { 256, 144 },
++        { 384, 216 },
++        { 512, 288 },
 +    };
  
 -    ALIGN(int16_t src[STRIDE * HEIGHT], 32);
 -    ALIGN(int16_t dst_ref[2 * STRIDE * HEIGHT + PADDING], 32);
 -    ALIGN(int16_t dst_new[2 * STRIDE * HEIGHT + PADDING], 32);
-+    ALIGN(int16_t src[STRIDE * FIXED_HEIGHT], 32);
-+    ALIGN(int16_t dst_ref[2 * STRIDE * FIXED_HEIGHT + PADDING], 32);
-+    ALIGN(int16_t dst_new[2 * STRIDE * FIXED_HEIGHT + PADDING], 32);
      declare_func(void,
                   int16_t *dst, const int16_t *src,
                   size_t src_width, size_t src_height);
-@@ -113,20 +142,21 @@ static void check_fixed_filter(FilterFunc func, const char *name, int align)
-             for (int i = 0; i < sizeof(src) / 2; i++)
+ 
+     if (check_func(func, name, align)) {
++        size_t src_count = MAX_WIDTH * MAX_HEIGHT;
++        size_t dst_count = 2 * MAX_WIDTH * MAX_HEIGHT + PADDING;
++        int16_t *src = ass_aligned_alloc(32, src_count * sizeof(*src), false);
++        int16_t *dst_ref = ass_aligned_alloc(
++            32, dst_count * sizeof(*dst_ref), false);
++        int16_t *dst_new = ass_aligned_alloc(
++            32, dst_count * sizeof(*dst_new), false);
++        if (!src || !dst_ref || !dst_new) {
++            fail();
++            goto cleanup;
++        }
++
++        // Exhaustive small dimensions protect every transparent-edge case.
+         for (int w = MIN_WIDTH; w <= STRIDE; w++) {
+-            for (int i = 0; i < sizeof(src) / 2; i++)
++            for (size_t i = 0; i < src_count; i++)
                  src[i] = rnd() % 0x4001;
  
 -            for (int i = 0; i < sizeof(dst_ref) / 2; i++)
--                dst_ref[i] = dst_new[i] = rnd();
 +            for (int h = 1; h <= FIXED_HEIGHT; h++) {
-+                for (int i = 0; i < sizeof(dst_ref) / 2; i++)
++                size_t stripe = align / 2;
++                size_t stored_width = (w + stripe - 1) & ~(stripe - 1);
++                size_t check_count = 2 * stored_width * h +
++                    FFMAX(32 * h, 4 * stored_width);
++                for (size_t i = 0; i < check_count; i++)
 +                    dst_ref[i] = dst_new[i] = rnd();
++
++                call_ref(dst_ref, src, w, h);
++                call_new(dst_new, src, w, h);
++
++                if (memcmp(dst_ref, dst_new,
++                           check_count * sizeof(*dst_ref))) {
++                    fail();
++                    break;
++                }
++            }
++        }
++
++        // Larger masks model complex signs without multiplying every width and
++        // height combination into the exhaustive boundary matrix.
++        for (size_t n = 0; n < sizeof(heavy_cases) / sizeof(heavy_cases[0]); n++) {
++            size_t stripe = align / 2;
++            size_t stored_width =
++                (heavy_cases[n].width + stripe - 1) & ~(stripe - 1);
++            size_t check_count = 2 * stored_width * heavy_cases[n].height +
++                FFMAX(32 * heavy_cases[n].height, 4 * stored_width);
++            for (size_t i = 0; i < src_count; i++)
++                src[i] = rnd() % 0x4001;
++            for (size_t i = 0; i < check_count; i++)
+                 dst_ref[i] = dst_new[i] = rnd();
  
 -            int h = HEIGHT - (rnd() & 3);
 -            call_ref(dst_ref, src, w, h);
 -            call_new(dst_new, src, w, h);
-+                call_ref(dst_ref, src, w, h);
-+                call_new(dst_new, src, w, h);
++            call_ref(dst_ref, src, heavy_cases[n].width, heavy_cases[n].height);
++            call_new(dst_new, src, heavy_cases[n].width, heavy_cases[n].height);
  
 -            if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
--                fail();
--                break;
-+                if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
-+                    fail();
-+                    break;
-+                }
++            if (memcmp(dst_ref, dst_new, check_count * sizeof(*dst_ref))) {
+                 fail();
+                 break;
              }
          }
  
 -        bench_new(dst_new, src, STRIDE, HEIGHT);
 +        bench_new(dst_new, src, STRIDE, FIXED_HEIGHT);
++
++cleanup:
++        ass_aligned_free(src);
++        ass_aligned_free(dst_ref);
++        ass_aligned_free(dst_new);
      }
  
      report(name, align);
-@@ -181,6 +211,9 @@ void checkasm_check_blur(unsigned cpu_flag)
+@@ -181,6 +265,9 @@ void checkasm_check_blur(unsigned cpu_flag)
          ass_bitmap_engine_init(cpu_flag),
          ass_bitmap_engine_init(cpu_flag | ASS_FLAG_WIDE_STRIPE)
      };
@@ -177,10 +231,10 @@ index a5520e7cce523e8eb9287df564f41dec2434369f..dab69249a99df462c83bc154148f3a59
      return engine;
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e13b0c246aa31d6e262b68bf6448f265d1cdf88
+index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9d11853aa
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,357 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -462,29 +516,67 @@ index 0000000000000000000000000000000000000000..1e13b0c246aa31d6e262b68bf6448f26
 +    }
 +}
 +
++static inline void expand_vert_edge_neon(
++    const int16_t *src, ptrdiff_t offs, size_t step,
++    uint16x8_t *rp, uint16x8_t *rn)
++{
++    expand8(
++        vreinterpretq_u16_s16(vld1q_s16(
++            get_line(src, offs - 2 * STRIPE_WIDTH, step))),
++        vreinterpretq_u16_s16(vld1q_s16(
++            get_line(src, offs - 1 * STRIPE_WIDTH, step))),
++        vreinterpretq_u16_s16(vld1q_s16(
++            get_line(src, offs, step))),
++        rp, rn);
++}
++
++static inline void expand_vert_inner_neon(
++    const int16_t *center, uint16x8_t *rp, uint16x8_t *rn)
++{
++    expand8(
++        vreinterpretq_u16_s16(vld1q_s16(center - 2 * STRIPE_WIDTH)),
++        vreinterpretq_u16_s16(vld1q_s16(center - 1 * STRIPE_WIDTH)),
++        vreinterpretq_u16_s16(vld1q_s16(center)),
++        rp, rn);
++}
++
 +void ass_expand_vert16_neon(int16_t *restrict dst,
-+                             const int16_t *restrict src,
-+                             size_t src_width, size_t src_height)
++                            const int16_t *restrict src,
++                            size_t src_width, size_t src_height)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
 +    ASSUME(src_width > 0 && src_height > 0);
 +
-+    size_t dst_height = 2 * src_height + 4;
++    size_t dst_pairs = src_height + 2;
 +    size_t step = STRIPE_WIDTH * src_height;
 +
 +    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
 +        ptrdiff_t offs = 0;
-+        for (size_t y = 0; y < dst_height; y += 2) {
++        size_t y = 0;
++        for (; y < 2; y++) {
 +            uint16x8_t rp, rn;
-+            expand8(
-+                vreinterpretq_u16_s16(vld1q_s16(
-+                    get_line(src, offs - 2 * STRIPE_WIDTH, step))),
-+                vreinterpretq_u16_s16(vld1q_s16(
-+                    get_line(src, offs - 1 * STRIPE_WIDTH, step))),
-+                vreinterpretq_u16_s16(vld1q_s16(
-+                    get_line(src, offs, step))),
-+                &rp, &rn);
++            expand_vert_edge_neon(src, offs, step, &rp, &rn);
++            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
++            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
++            dst += 2 * STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++
++        // Pairs 2 through height - 1 consume only real source rows, so their
++        // three loads can bypass transparent-edge selection.
++        for (; y < src_height; y++) {
++            uint16x8_t rp, rn;
++            expand_vert_inner_neon(src + offs, &rp, &rn);
++            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
++            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
++            dst += 2 * STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++
++        for (; y < dst_pairs; y++) {
++            uint16x8_t rp, rn;
++            expand_vert_edge_neon(src, offs, step, &rp, &rn);
 +            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
 +            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
 +            dst += 2 * STRIPE_WIDTH;
