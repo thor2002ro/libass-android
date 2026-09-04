@@ -1,0 +1,76 @@
+diff --git a/checkasm/rasterizer.c b/checkasm/rasterizer.c
+--- a/checkasm/rasterizer.c
++++ b/checkasm/rasterizer.c
+@@ -198,6 +198,7 @@ static void check_merge_tile(MergeTileFunc func, const char *name, int tile_size
+ #if defined(__arm__) && defined(__ARM_NEON)
+ static void solid_dispatch_marker(void) {}
+ static void generic_dispatch_marker(void) {}
++static void merge_dispatch_marker(void) {}
+ #endif
+ 
+ 
+@@ -212,6 +213,7 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+         FillSolidTileFunc ass_fill_solid_tile16_c;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_c;
++        MergeTileFunc ass_merge_tile16_c;
+         if (checkasm_check_func(solid_dispatch_marker,
+                                "fill_solid_dispatch_tile16") &&
+             engine[0].fill_solid == ass_fill_solid_tile16_c)
+@@ -227,6 +229,11 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+             engine[0].fill_generic == ass_fill_generic_tile16_c)
+             fail();
+         report("fill_generic_dispatch_tile16");
++        if (checkasm_check_func(merge_dispatch_marker,
++                               "merge_dispatch_tile16") &&
++            engine[0].merge == ass_merge_tile16_c)
++            fail();
++        report("merge_dispatch_tile16");
+     }
+ #endif
+     for (int i = 0; i < 2; i++) {
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -208,6 +208,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         FillSolidTileFunc ass_fill_solid_tile16_neon;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_neon;
++        MergeTileFunc ass_merge_tile16_neon;
+         BitmapBlendFunc ass_add_bitmaps_neon;
+         ShiftFunc ass_shift_neon;
+         BeBlurFunc ass_be_blur_neon;
+@@ -221,6 +222,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+             engine.fill_solid = ass_fill_solid_tile16_neon;
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+             engine.fill_generic = ass_fill_generic_tile16_neon;
++            engine.merge = ass_merge_tile16_neon;
+         }
+         engine.add_bitmaps = ass_add_bitmaps_neon;
+         engine.shift = ass_shift_neon;
+diff --git a/libass/c/c_rasterizer_neon.c b/libass/c/c_rasterizer_neon.c
+--- a/libass/c/c_rasterizer_neon.c
++++ b/libass/c/c_rasterizer_neon.c
+@@ -35,6 +35,22 @@ void ass_fill_solid_tile16_neon(uint8_t *buf, ptrdiff_t stride, int set)
+ }
+ 
+ 
++void ass_merge_tile16_neon(uint8_t *restrict buf, ptrdiff_t stride,
++                           const uint8_t *restrict tile)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++
++    for (int y = 0; y < TILE_SIZE; y++) {
++        // Each tile row is one vector, and unsigned maximum implements the
++        // coverage union without touching destination stride padding.
++        uint8x16_t merged = vmaxq_u8(vld1q_u8(buf), vld1q_u8(tile));
++        vst1q_u8(buf, merged);
++        buf += stride;
++        tile += TILE_SIZE;
++    }
++}
++
++
+ static inline uint8x8_t fill_halfplane_line_neon(int16x8_t x,
+                                                   int16_t aa,
+                                                   int16_t cc,
