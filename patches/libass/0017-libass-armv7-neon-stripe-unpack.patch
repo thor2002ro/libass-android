@@ -44,7 +44,7 @@ diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 index 3d24ef53cb7147a4b5a88a914049a7f136556238..6d71052c46212228aceb170e101cb82394e558a4 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -73,6 +73,51 @@ static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
+@@ -73,5 +73,50 @@ static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
      *rn = vrhaddq_u16(vhaddq_u16(value, n1), z0);
  }
  
@@ -93,6 +93,5 @@ index 3d24ef53cb7147a4b5a88a914049a7f136556238..6d71052c46212228aceb170e101cb823
 +    }
 +}
 +
- void ass_stripe_pack16_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
-                              const int16_t *restrict src,
-                              size_t width, size_t height)
+ static inline uint8x8_t pack8_neon(const int16_t *src, uint16x8_t dither)
+ {

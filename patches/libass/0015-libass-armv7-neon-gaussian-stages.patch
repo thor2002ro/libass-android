@@ -34,6 +34,42 @@ index bd5a9f37df9e85df26660ee537ba883da1e185b5..10f59abb7b202ac5a2d935572ecd9a30
  static void check_stripe_unpack(Convert8to16Func func, const char *name, int align)
  {
      ALIGN(uint8_t src[STRIDE * HEIGHT], 32);
+@@ -74,20 +99,21 @@ static void check_stripe_pack(Convert16to8Func func, const char *name, int align
+             for (int i = 0; i < sizeof(src) / 2; i++)
+                 src[i] = rnd() % 0x4001;
+ 
+-            memset(dst_ref, 0, sizeof(dst_ref));
+-            memset(dst_new, 0, sizeof(dst_new));
+-            for (int y = 0; y < HEIGHT; y++) {
+-                for (int x = 0; x < w; x++)
+-                    dst_ref[y * STRIDE + x] = dst_new[y * STRIDE + x] = rnd();
+-            }
+-
+-            int h = HEIGHT - (rnd() & 3);
+-            call_ref(dst_ref, STRIDE, src, w, h);
+-            call_new(dst_new, STRIDE, src, w, h);
+-
+-            if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
+-                fail();
+-                break;
++            for (int h = 1; h <= HEIGHT; h++) {
++                memset(dst_ref, 0, sizeof(dst_ref));
++                memset(dst_new, 0, sizeof(dst_new));
++                for (int y = 0; y < HEIGHT; y++) {
++                    for (int x = 0; x < w; x++)
++                        dst_ref[y * STRIDE + x] = dst_new[y * STRIDE + x] = rnd();
++                }
++
++                call_ref(dst_ref, STRIDE, src, w, h);
++                call_new(dst_new, STRIDE, src, w, h);
++
++                if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
++                    fail();
++                    break;
++                }
+             }
+         }
+ 
 @@ -181,6 +206,9 @@ void checkasm_check_blur(unsigned cpu_flag)
          ass_bitmap_engine_init(cpu_flag),
          ass_bitmap_engine_init(cpu_flag | ASS_FLAG_WIDE_STRIPE)
@@ -94,7 +130,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f136556238
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,285 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -170,9 +206,16 @@ index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f1
 +    *rn = vrhaddq_u16(vhaddq_u16(value, n1), z0);
 +}
 +
++static inline uint8x8_t pack8_neon(const int16_t *src, uint16x8_t dither)
++{
++    uint16x8_t value = vreinterpretq_u16_s16(vld1q_s16(src));
++    value = vsubq_u16(value, vshrq_n_u16(value, 8));
++    return vshrn_n_u16(vaddq_u16(value, dither), 6);
++}
++
 +void ass_stripe_pack16_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
-+                             const int16_t *restrict src,
-+                             size_t width, size_t height)
++                            const int16_t *restrict src,
++                            size_t width, size_t height)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT) && !(dst_stride % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
@@ -182,17 +225,25 @@ index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f1
 +        {  8, 40,  8, 40,  8, 40,  8, 40 },
 +        { 56, 24, 56, 24, 56, 24, 56, 24 },
 +    };
++    uint16x8_t dither0 = vld1q_u16(dither[0]);
++    uint16x8_t dither1 = vld1q_u16(dither[1]);
 +
 +    // The intermediate bitmap stores one vertical eight-pixel stripe at a
 +    // time, so advancing src walks down a stripe rather than across a row.
 +    for (size_t x = 0; x < width; x += STRIPE_WIDTH) {
 +        uint8_t *ptr = dst;
-+        for (size_t y = 0; y < height; y++) {
-+            uint16x8_t value = vreinterpretq_u16_s16(vld1q_s16(src));
-+            value = vsubq_u16(value, vshrq_n_u16(value, 8));
-+            value = vaddq_u16(value, vld1q_u16(dither[y & 1]));
-+            vst1_u8(ptr, vshrn_n_u16(value, 6));
-+            ptr += dst_stride;
++        size_t y = 0;
++        // Pack a dither pair together to reuse both constants and reduce the
++        // loop-control work on the common multi-row path.
++        for (; y + 1 < height; y += 2) {
++            vst1_u8(ptr, pack8_neon(src, dither0));
++            vst1_u8(ptr + dst_stride,
++                    pack8_neon(src + STRIPE_WIDTH, dither1));
++            ptr += 2 * dst_stride;
++            src += 2 * STRIPE_WIDTH;
++        }
++        if (y < height) {
++            vst1_u8(ptr, pack8_neon(src, dither0));
 +            src += STRIPE_WIDTH;
 +        }
 +        dst += STRIPE_WIDTH;
