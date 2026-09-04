@@ -1,5 +1,33 @@
+diff --git a/Makefile_util.am b/Makefile_util.am
+index cf863faf70d0f127cdbe1c3be1067465aba47c72..553ce863c387ce19a2fcd25052f8aec1468cb807 100644
+--- a/Makefile_util.am
++++ b/Makefile_util.am
+@@ -20,6 +20,11 @@ compare_compare_LDADD = libass/libass_internal.la
+ compare_compare_LDFLAGS = $(AM_LDFLAGS) $(LIBPNG_LIBS) -static
+ EXTRA_DIST += compare/README.md
+ 
++check_PROGRAMS += test/offscreen_policy
++TESTS += test/offscreen_policy$(EXEEXT)
++test_offscreen_policy_SOURCES = test/offscreen_policy.c
++test_offscreen_policy_CPPFLAGS = -I$(top_srcdir)/libass
++
+ if ENABLE_FUZZ
+ noinst_PROGRAMS += fuzz/fuzz
+ endif
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index 62968635215feaf7e9df0d0340091f515a9c1e01..e6554e28d5e71f8263346e36d8626436f19ec2f8 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -22,6 +22,7 @@ libass_libass_internal_la_SOURCES = \
+     libass/ass_drawing.h libass/ass_drawing.c \
+     libass/ass_bitmap.h libass/ass_bitmap.c libass/ass_blur.c \
+     libass/ass_rasterizer.h libass/ass_rasterizer.c \
++    libass/ass_offscreen.h \
+     libass/ass_render.h libass/ass_render.c libass/ass_render_api.c \
+     libass/ass_bitmap_engine.h libass/ass_bitmap_engine.c \
+     libass/ass_arabic_charmap.h libass/ass_arabic_charmap.c \
 diff --git a/libass/ass_bitmap.c b/libass/ass_bitmap.c
-index ef970b6..4182b45 100644
+index ef970b6c7c8a20a33a6fb49b2fbeddf9b89824f6..4182b45e93ebd9c52ac4729ba2201fd7d44815d8 100644
 --- a/libass/ass_bitmap.c
 +++ b/libass/ass_bitmap.c
 @@ -147,7 +147,8 @@ bool ass_copy_bitmap(const BitmapEngine *engine, Bitmap *dst, const Bitmap *src)
@@ -33,7 +61,7 @@ index ef970b6..4182b45 100644
      int32_t h = y_max - y_min;
  
 diff --git a/libass/ass_bitmap.h b/libass/ass_bitmap.h
-index 1605663..cf86543 100644
+index 16056631efa726ccf88426e766425d2f9bbf0a18..cf865431c4c7515a7a9431d43047a01b1ee656de 100644
 --- a/libass/ass_bitmap.h
 +++ b/libass/ass_bitmap.h
 @@ -42,11 +42,13 @@ void ass_free_bitmap(Bitmap *bm);
@@ -52,7 +80,7 @@ index 1605663..cf86543 100644
  void ass_shift_bitmap(const BitmapEngine *engine, Bitmap *bm, int32_t shift_x, int32_t shift_y);
  void ass_fix_outline(Bitmap *bm_g, Bitmap *bm_o);
 diff --git a/libass/ass_blur.c b/libass/ass_blur.c
-index ec91a92..5adb16a 100644
+index ec91a92410d67ac7da426f373309720c1b7a8e4f..5adb16aebea911b72e45bbf35cf5d3900280de11 100644
 --- a/libass/ass_blur.c
 +++ b/libass/ass_blur.c
 @@ -145,26 +145,54 @@ typedef struct {
@@ -128,8 +156,78 @@ index ec91a92..5adb16a 100644
  
      const int stripe_width = 1 << (engine->align_order - 1);
      uint64_t size = (((uint64_t) end_w + stripe_width - 1) & ~(stripe_width - 1)) * end_h;
+diff --git a/libass/ass_cache.c b/libass/ass_cache.c
+index 47069c15a7d9407bbe6897d9da2f8586d955e5e0..a4f8fe513f52ff426765bf815dc46d52029ba177 100644
+--- a/libass/ass_cache.c
++++ b/libass/ass_cache.c
+@@ -377,11 +377,7 @@ Cache *ass_cache_create(const CacheDesc *desc)
+     return cache;
+ }
+ 
+-// Retrieve a value corresponding to a particular cache key,
+-// creating one if it does not already exist.
+-// The returned item is guaranteed to be valid until the next ass_cache_cut call;
+-// to extend its lifetime further, call ass_cache_inc_ref().
+-void *ass_cache_get(Cache *cache, void *key, void *priv)
++static void *cache_get(Cache *cache, void *key, void *priv, bool create)
+ {
+     const CacheDesc *desc = cache->desc;
+     size_t key_offs = CACHE_ITEM_SIZE + align_cache(desc->value_size);
+@@ -401,13 +397,17 @@ void *ass_cache_get(Cache *cache, void *key, void *priv)
+                 cache->queue_last = &item->queue_next;
+                 item->queue_next = NULL;
+             }
+-            desc->key_move_func(NULL, key);
++            if (create)
++                desc->key_move_func(NULL, key);
+ 
+             return (char *) item + CACHE_ITEM_SIZE;
+         }
+         item = item->next;
+     }
+ 
++    if (!create)
++        return NULL;
++
+     item = malloc(key_offs + desc->key_size);
+     if (!item) {
+         desc->key_move_func(NULL, key);
+@@ -441,6 +441,21 @@ void *ass_cache_get(Cache *cache, void *key, void *priv)
+     return value;
+ }
+ 
++// Retrieve an existing value without taking ownership of the key.
++void *ass_cache_peek(Cache *cache, const void *key)
++{
++    return cache_get(cache, (void *) key, NULL, false);
++}
++
++// Retrieve a value corresponding to a particular cache key,
++// creating one if it does not already exist.
++// The returned item is guaranteed to be valid until the next ass_cache_cut call;
++// to extend its lifetime further, call ass_cache_inc_ref().
++void *ass_cache_get(Cache *cache, void *key, void *priv)
++{
++    return cache_get(cache, key, priv, true);
++}
++
+ void *ass_cache_key(void *value)
+ {
+     CacheItem *item = value_to_item(value);
+diff --git a/libass/ass_cache.h b/libass/ass_cache.h
+index 53eac20077f9660883b2a092fdab21c7bcd38781..105f878e4dc3702307e7337ac3ad4263216c3033 100644
+--- a/libass/ass_cache.h
++++ b/libass/ass_cache.h
+@@ -99,6 +99,7 @@ typedef struct
+ } CacheDesc;
+ 
+ Cache *ass_cache_create(const CacheDesc *desc);
++void *ass_cache_peek(Cache *cache, const void *key);
+ void *ass_cache_get(Cache *cache, void *key, void *priv);
+ void *ass_cache_key(void *value);
+ void ass_cache_inc_ref(void *value);
 diff --git a/libass/ass_cache_template.h b/libass/ass_cache_template.h
-index 84d6f4c..f9c928a 100644
+index 84d6f4cc74d653b1950262947f0e869acb1e4e70..f9c928ad721d06ee3f494f85f8fc05bb7d4692cf 100644
 --- a/libass/ass_cache_template.h
 +++ b/libass/ass_cache_template.h
 @@ -8,6 +8,8 @@
@@ -177,53 +275,176 @@ index 84d6f4c..f9c928a 100644
  #undef VECTOR
 +#undef RECT
  #undef END
+diff --git a/libass/ass_offscreen.h b/libass/ass_offscreen.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e171741fc6d5942d4544719475fc35ca2e1636a
+--- /dev/null
++++ b/libass/ass_offscreen.h
+@@ -0,0 +1,54 @@
++#ifndef LIBASS_OFFSCREEN_H
++#define LIBASS_OFFSCREEN_H
++
++#include <limits.h>
++#include <stdint.h>
++
++typedef enum {
++    ASS_BITMAP_KEEP_FULL,
++    ASS_BITMAP_CLIP_PARTIAL,
++    ASS_BITMAP_CULL,
++} ASS_BitmapClipDecision;
++
++static inline ASS_BitmapClipDecision ass_bitmap_clip_decision(
++    int64_t width, int64_t height,
++    int64_t visible_width, int64_t visible_height)
++{
++    if (visible_width <= 0 || visible_height <= 0)
++        return ASS_BITMAP_CULL;
++    if (width <= 0 || height <= 0 ||
++            (visible_width >= width && visible_height >= height))
++        return ASS_BITMAP_KEEP_FULL;
++
++    uint64_t full_area = (uint64_t) width * (uint64_t) height;
++    uint64_t visible_area =
++        (uint64_t) visible_width * (uint64_t) visible_height;
++    uint64_t saved_area = full_area - visible_area;
++    uint64_t quarter_area = full_area / 4 + (full_area % 4 != 0);
++
++    if (full_area > 256 * 256 && saved_area >= 128 * 128 &&
++            saved_area >= quarter_area)
++        return ASS_BITMAP_CLIP_PARTIAL;
++    return ASS_BITMAP_KEEP_FULL;
++}
++
++static inline int32_t ass_clamp_clip_coord(int64_t value)
++{
++    if (value < INT32_MIN)
++        return INT32_MIN;
++    if (value > INT32_MAX)
++        return INT32_MAX;
++    return value;
++}
++
++static inline void ass_expand_clip_axis(int32_t *min, int32_t *max,
++                                        uint32_t pad, int32_t shadow)
++{
++    int64_t shadow_before = shadow > 0 ? ((int64_t) shadow + 63) >> 6 : 0;
++    int64_t shadow_after = shadow < 0 ? (-(int64_t) shadow + 63) >> 6 : 0;
++
++    *min = ass_clamp_clip_coord((int64_t) *min - pad - shadow_before);
++    *max = ass_clamp_clip_coord((int64_t) *max + pad + shadow_after);
++}
++
++#endif
 diff --git a/libass/ass_render.c b/libass/ass_render.c
-index 6060fdd..4e4aee1 100644
+index 6060fdd7f85b0bbec6a53af492b1e227f02baf2d..d60ab4f5b78cb74a3f1999fd3edfe106b80c75e6 100644
 --- a/libass/ass_render.c
 +++ b/libass/ass_render.c
-@@ -510,6 +510,7 @@ render_glyph(RenderContext *state, Bitmap *bm, int dst_x, int dst_y,
+@@ -30,6 +30,7 @@
  
+ #include "ass.h"
+ #include "ass_outline.h"
++#include "ass_offscreen.h"
+ #include "ass_render.h"
+ #include "ass_parse.h"
+ #include "ass_priv.h"
+@@ -508,8 +509,14 @@ render_glyph(RenderContext *state, Bitmap *bm, int dst_x, int dst_y,
+     return tail;
+ }
+ 
++static bool transformed_bitmap_bounds(const BitmapHashKey *key,
++                                      ASS_Vector pos, ASS_Rect *bounds);
++static void set_bitmap_clip(BitmapHashKey *key, ASS_Vector pos,
++                            const ASS_Rect *clip, const ASS_Rect *bounds);
++
  static bool quantize_transform(double m[3][3], ASS_Vector *pos,
                                 ASS_DVector *offset, bool first,
 +                               ASS_Rect *clip,
                                 BitmapHashKey *key)
  {
      // Full transform:
-@@ -658,6 +659,33 @@ static bool quantize_transform(double m[3][3], ASS_Vector *pos,
+@@ -658,6 +665,14 @@ static bool quantize_transform(double m[3][3], ASS_Vector *pos,
      key->matrix_x.x = qm[0][0];  key->matrix_x.y = qm[0][1];
      key->matrix_y.x = qm[1][0];  key->matrix_y.y = qm[1][1];
      key->matrix_z.x = qm[2][0];  key->matrix_z.y = qm[2][1];
 +
-+    if (clip && !(
-+        ((qr[0] + key->outline->cbox.x_min) < (int64_t)((uint64_t)clip->x_min << SUBPIXEL_ORDER)) ||
-+        ((qr[1] + key->outline->cbox.y_min) < (int64_t)((uint64_t)clip->y_min << SUBPIXEL_ORDER)) ||
-+        ((qr[0] + key->outline->cbox.x_max) > (int64_t)((uint64_t)clip->x_max << SUBPIXEL_ORDER)) ||
-+        ((qr[1] + key->outline->cbox.y_max) > (int64_t)((uint64_t)clip->y_max << SUBPIXEL_ORDER))
-+    ))
-+        clip = NULL;
-+
-+#define CLIP_PRECISION 64
-+#define CLIP_PRECISION_MASK (~(CLIP_PRECISION - 1))
-+#define CLIP_MIN(x) ((x) & CLIP_PRECISION_MASK)
-+#define CLIP_MAX(x) (((x) + CLIP_PRECISION) & CLIP_PRECISION_MASK)
-+    if (clip) {
-+        key->clip = (ASS_Rect){
-+            CLIP_MIN(clip->x_min - pos->x),
-+            CLIP_MIN(clip->y_min - pos->y),
-+            CLIP_MAX(clip->x_max - pos->x),
-+            CLIP_MAX(clip->y_max - pos->y),
-+        };
-+    } else {
-+        key->clip = (ASS_Rect){
-+            INT32_MIN, INT32_MIN,
-+            INT32_MAX, INT32_MAX,
-+        };
-+    }
++    key->clip = (ASS_Rect){
++        INT32_MIN, INT32_MIN,
++        INT32_MAX, INT32_MAX,
++    };
++    if (clip)
++        set_bitmap_clip(key, *pos, clip, NULL);
 +
      return true;
  }
  
-@@ -860,11 +888,18 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
+@@ -699,6 +714,66 @@ static void restore_transform(double m[3][3], const BitmapHashKey *key)
+         m[i][2] -= m[i][0] * x0 + m[i][1] * y0;
+ }
+ 
++static bool transformed_bitmap_bounds(const BitmapHashKey *key,
++                                      ASS_Vector pos, ASS_Rect *bounds)
++{
++    double m[3][3];
++    restore_transform(m, key);
++
++    const ASS_Rect *cbox = &key->outline->cbox;
++    const int32_t x[2] = { cbox->x_min, cbox->x_max };
++    const int32_t y[2] = { cbox->y_min, cbox->y_max };
++    double x_min = INFINITY, y_min = INFINITY;
++    double x_max = -INFINITY, y_max = -INFINITY;
++
++    for (int i = 0; i < 2; i++) {
++        for (int j = 0; j < 2; j++) {
++            double z = m[2][0] * x[i] + m[2][1] * y[j] + m[2][2];
++            double w = 1 / FFMAX(z, 0.1);
++            double tx = (m[0][0] * x[i] + m[0][1] * y[j] + m[0][2]) * w;
++            double ty = (m[1][0] * x[i] + m[1][1] * y[j] + m[1][2]) * w;
++            if (!(fabs(tx) < OUTLINE_MAX && fabs(ty) < OUTLINE_MAX))
++                return false;
++            x_min = FFMIN(x_min, tx);
++            y_min = FFMIN(y_min, ty);
++            x_max = FFMAX(x_max, tx);
++            y_max = FFMAX(y_max, ty);
++        }
++    }
++
++    bounds->x_min = pos.x + floor(x_min / 64) - 1;
++    bounds->y_min = pos.y + floor(y_min / 64) - 1;
++    bounds->x_max = pos.x + ceil(x_max / 64) + 1;
++    bounds->y_max = pos.y + ceil(y_max / 64) + 1;
++    return true;
++}
++
++#define CLIP_PRECISION 256
++#define CLIP_PRECISION_MASK (~(CLIP_PRECISION - 1))
++#define CLIP_MIN(x) ((x) & CLIP_PRECISION_MASK)
++#define CLIP_MAX(x) (((x) + CLIP_PRECISION) & CLIP_PRECISION_MASK)
++
++static void set_bitmap_clip(BitmapHashKey *key, ASS_Vector pos,
++                            const ASS_Rect *clip, const ASS_Rect *bounds)
++{
++    ASS_Rect calculated_bounds;
++    if (!bounds) {
++        if (!transformed_bitmap_bounds(key, pos, &calculated_bounds))
++            return;
++        bounds = &calculated_bounds;
++    }
++    if (bounds->x_min >= clip->x_min && bounds->y_min >= clip->y_min &&
++            bounds->x_max <= clip->x_max && bounds->y_max <= clip->y_max)
++        return;
++
++    key->clip = (ASS_Rect){
++        CLIP_MIN(clip->x_min - pos.x),
++        CLIP_MIN(clip->y_min - pos.y),
++        CLIP_MAX(clip->x_max - pos.x),
++        CLIP_MAX(clip->y_max - pos.y),
++    };
++}
++
+ // Calculate bitmap memory footprint
+ static inline size_t bitmap_size(const Bitmap *bm)
+ {
+@@ -860,11 +935,18 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
      m[0][2] = int_to_d6(render_priv->settings.left_margin);
      m[1][2] = int_to_d6(render_priv->settings.top_margin);
  
@@ -243,15 +464,82 @@ index 6060fdd..4e4aee1 100644
          return;
  
      Bitmap *clip_bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
-@@ -1517,6 +1552,7 @@ static void calc_transform_matrix(RenderContext *state,
+@@ -1517,6 +1599,64 @@ static void calc_transform_matrix(RenderContext *state,
      }
  }
  
 +int ass_be_padding(int be);
++static double restore_blur(int qblur);
++
++static bool bitmap_exceeds_clip(const ASS_Rect *bounds, const ASS_Rect *clip)
++{
++    return bounds &&
++        (bounds->x_min < clip->x_min || bounds->y_min < clip->y_min ||
++         bounds->x_max > clip->x_max || bounds->y_max > clip->y_max);
++}
++
++static void get_filter_padding(const FilterDesc *filter,
++                               uint32_t *xpad, uint32_t *ypad)
++{
++    *xpad = ass_blur_padding(restore_blur(filter->blur_x)) +
++        ass_be_padding(filter->be);
++    *ypad = ass_blur_padding(restore_blur(filter->blur_y)) +
++        ass_be_padding(filter->be);
++}
++
++static void expand_glyph_clip(const FilterDesc *filter, ASS_Rect *clip)
++{
++    uint32_t xpad, ypad;
++    get_filter_padding(filter, &xpad, &ypad);
++    ass_expand_clip_axis(&clip->x_min, &clip->x_max, xpad, filter->shadow.x);
++    ass_expand_clip_axis(&clip->y_min, &clip->y_max, ypad, filter->shadow.y);
++}
++
++static Bitmap *get_cached_bitmap(RenderContext *state, BitmapHashKey *key,
++                                 ASS_Vector pos, const ASS_Rect *clip,
++                                 const ASS_Rect *bounds)
++{
++    if (!bounds)
++        return ass_cache_get(state->renderer->cache.bitmap_cache, key, state);
++
++    int64_t width = (int64_t) bounds->x_max - bounds->x_min;
++    int64_t height = (int64_t) bounds->y_max - bounds->y_min;
++    int64_t visible_width = FFMAX(0,
++        (int64_t) FFMIN(bounds->x_max, clip->x_max) -
++        FFMAX(bounds->x_min, clip->x_min));
++    int64_t visible_height = FFMAX(0,
++        (int64_t) FFMIN(bounds->y_max, clip->y_max) -
++        FFMAX(bounds->y_min, clip->y_min));
++
++    ASS_BitmapClipDecision decision = ass_bitmap_clip_decision(
++        width, height, visible_width, visible_height);
++    if (decision == ASS_BITMAP_CULL)
++        return NULL;
++
++    Cache *cache = state->renderer->cache.bitmap_cache;
++    Bitmap *bitmap = ass_cache_peek(cache, key);
++    if (bitmap)
++        return bitmap;
++
++    if (decision == ASS_BITMAP_CLIP_PARTIAL)
++        set_bitmap_clip(key, pos, clip, bounds);
++    return ass_cache_get(cache, key, state);
++}
++
  /**
   * \brief Get bitmaps for a glyph
   * \param info glyph info
-@@ -1549,9 +1585,62 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+@@ -1529,7 +1669,8 @@ static void
+ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+                  int32_t *leftmost_x,
+                  ASS_Vector *pos, ASS_Vector *pos_o,
+-                 ASS_DVector *offset, bool first, int flags)
++                 ASS_DVector *offset, bool first, int flags,
++                 const FilterDesc *filter)
+ {
+     ASS_Renderer *render_priv = state->renderer;
+ 
+@@ -1549,12 +1690,37 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
      if (info->effect_type == EF_KARAOKE_KF)
          ass_outline_update_min_transformed_x(&info->outline->outline[0], m, leftmost_x);
  
@@ -273,58 +561,44 @@ index 6060fdd..4e4aee1 100644
 +    }
 +#endif
 +
-+    bool potentially_clipped = (
-+        info->pos.x + info->outline->cbox.x_min < clip_rect.x_min << SUBPIXEL_ORDER ||
-+        info->pos.y + info->outline->cbox.y_min < clip_rect.y_min << SUBPIXEL_ORDER ||
-+        info->pos.x + info->outline->cbox.x_max > clip_rect.x_max << SUBPIXEL_ORDER ||
-+        info->pos.y + info->outline->cbox.y_max > clip_rect.y_max << SUBPIXEL_ORDER
-+    );
-+
-+    if (potentially_clipped) {
-+        double blur_radius_scale = 2 / sqrt(log(256));
-+        double blur_scale_x = state->blur_scale_x * blur_radius_scale;
-+        double blur_scale_y = state->blur_scale_y * blur_radius_scale;
-+        double blur_x = info->blur * blur_scale_x;
-+        double blur_y = info->blur * blur_scale_y;
-+
-+        uint32_t xpad = ass_blur_padding(blur_x) + ass_be_padding(info->be);
-+        uint32_t ypad = ass_blur_padding(blur_y) + ass_be_padding(info->be);
-+
-+        clip_rect.x_min -= xpad;
-+        clip_rect.y_min -= ypad;
-+        clip_rect.x_max += xpad;
-+        clip_rect.y_max += ypad;
-+
-+        int32_t shadow_x = double_to_d6(info->shadow_x * state->border_scale_x);
-+        int32_t shadow_y = double_to_d6(info->shadow_y * state->border_scale_y);
-+
-+        if (shadow_x > 0)
-+            clip_rect.x_min -= (shadow_x + 63) >> 6;
-+        else
-+            clip_rect.x_max -= (shadow_x - 63) >> 6;
-+        if (shadow_y > 0)
-+            clip_rect.y_min -= (shadow_y + 63) >> 6;
-+        else
-+            clip_rect.y_max -= (shadow_y - 63) >> 6;
-+    }
-+
      BitmapHashKey key;
      key.outline = info->outline;
 -    if (!quantize_transform(m, pos, offset, first, &key))
-+    if (!quantize_transform(m, pos, offset, first, potentially_clipped ? &clip_rect : NULL, &key))
++    if (!quantize_transform(m, pos, offset, first, NULL, &key))
          return;
  
-     info->bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
-@@ -1675,7 +1764,7 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+-    info->bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
++    ASS_Rect bounds;
++    const ASS_Rect *bitmap_bounds =
++        transformed_bitmap_bounds(&key, *pos, &bounds) ? &bounds : NULL;
++    bool clip_expanded = bitmap_exceeds_clip(bitmap_bounds, &clip_rect);
++    if (clip_expanded)
++        expand_glyph_clip(filter, &clip_rect);
++
++    info->bm = get_cached_bitmap(state, &key, *pos, &clip_rect, bitmap_bounds);
+     if (!info->bm || !info->bm->buffer)
+         info->bm = NULL;
+ 
+@@ -1675,10 +1841,16 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
  
      key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
      if (!key.outline || !key.outline->valid ||
 -            !quantize_transform(m, pos_o, offset, false, &key))
-+            !quantize_transform(m, pos_o, offset, false, potentially_clipped ? &clip_rect : NULL, &key))
++            !quantize_transform(m, pos_o, offset, false, NULL, &key))
          return;
  
-     info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
-@@ -1709,7 +1798,7 @@ size_t ass_bitmap_construct(void *key, void *value, void *priv)
+-    info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
++    bitmap_bounds = transformed_bitmap_bounds(&key, *pos_o, &bounds) ?
++        &bounds : NULL;
++    if (!clip_expanded && bitmap_exceeds_clip(bitmap_bounds, &clip_rect))
++        expand_glyph_clip(filter, &clip_rect);
++
++    info->bm_o = get_cached_bitmap(state, &key, *pos_o, &clip_rect,
++                                   bitmap_bounds);
+     if (!info->bm_o || !info->bm_o->buffer) {
+         info->bm_o = NULL;
+         *pos_o = *pos;
+@@ -1709,7 +1881,7 @@ size_t ass_bitmap_construct(void *key, void *value, void *priv)
          ass_outline_transform_2d(&outline[1], &k->outline->outline[1], m);
      }
  
@@ -333,3 +607,151 @@ index 6060fdd..4e4aee1 100644
          memset(bm, 0, sizeof(*bm));
      ass_outline_free(&outline[0]);
      ass_outline_free(&outline[1]);
+@@ -2587,6 +2759,27 @@ static double restore_blur(int qblur)
+     return sigma * sigma;
+ }
+ 
++static void init_filter_desc(RenderContext *state, const GlyphInfo *info,
++                             int flags, FilterDesc *filter)
++{
++    filter->flags = flags;
++    filter->be = info->be;
++
++    int32_t shadow_mask_x, shadow_mask_y;
++    double blur_radius_scale = 2 / sqrt(log(256));
++    double blur_scale_x = state->blur_scale_x * blur_radius_scale;
++    double blur_scale_y = state->blur_scale_y * blur_radius_scale;
++    filter->blur_x = quantize_blur(info->blur * blur_scale_x, &shadow_mask_x);
++    filter->blur_y = quantize_blur(info->blur * blur_scale_y, &shadow_mask_y);
++    if (flags & FILTER_NONZERO_SHADOW) {
++        int32_t x = double_to_d6(info->shadow_x * state->border_scale_x);
++        int32_t y = double_to_d6(info->shadow_y * state->border_scale_y);
++        filter->shadow.x = (x + (shadow_mask_x >> 1)) & ~shadow_mask_x;
++        filter->shadow.y = (y + (shadow_mask_y >> 1)) & ~shadow_mask_y;
++    } else
++        filter->shadow.x = filter->shadow.y = 0;
++}
++
+ // Convert glyphs to bitmaps, combine them, apply blur, generate shadows.
+ static void render_and_combine_glyphs(RenderContext *state,
+                                       double device_x, double device_y)
+@@ -2649,23 +2842,7 @@ static void render_and_combine_glyphs(RenderContext *state,
+                 current_info->effect_timing = info->effect_timing;
+                 current_info->leftmost_x = OUTLINE_MAX;
+ 
+-                FilterDesc *filter = &current_info->filter;
+-                filter->flags = flags;
+-                filter->be = info->be;
+-
+-                int32_t shadow_mask_x, shadow_mask_y;
+-                double blur_radius_scale = 2 / sqrt(log(256));
+-                double blur_scale_x = state->blur_scale_x * blur_radius_scale;
+-                double blur_scale_y = state->blur_scale_y * blur_radius_scale;
+-                filter->blur_x = quantize_blur(info->blur * blur_scale_x, &shadow_mask_x);
+-                filter->blur_y = quantize_blur(info->blur * blur_scale_y, &shadow_mask_y);
+-                if (flags & FILTER_NONZERO_SHADOW) {
+-                    int32_t x = double_to_d6(info->shadow_x * state->border_scale_x);
+-                    int32_t y = double_to_d6(info->shadow_y * state->border_scale_y);
+-                    filter->shadow.x = (x + (shadow_mask_x >> 1)) & ~shadow_mask_x;
+-                    filter->shadow.y = (y + (shadow_mask_y >> 1)) & ~shadow_mask_y;
+-                } else
+-                    filter->shadow.x = filter->shadow.y = 0;
++                init_filter_desc(state, info, flags, &current_info->filter);
+ 
+                 current_info->x = current_info->y = INT_MAX;
+                 current_info->bm = current_info->bm_o = current_info->bm_s = NULL;
+@@ -2687,7 +2864,8 @@ static void render_and_combine_glyphs(RenderContext *state,
+             info->pos.x = double_to_d6(device_x + d6_to_double(info->pos.x) * render_priv->par_scale_x);
+             info->pos.y = double_to_d6(device_y) + info->pos.y;
+             get_bitmap_glyph(state, info, &current_info->leftmost_x, &pos, &pos_o,
+-                             &offset, !current_info->bitmap_count, flags);
++                             &offset, !current_info->bitmap_count, flags,
++                             &current_info->filter);
+ 
+             if (!info->bm && !info->bm_o)
+                 continue;
+diff --git a/test/offscreen_policy.c b/test/offscreen_policy.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b05b246a9c24d5fc87fa7c7046d5792783d38e6
+--- /dev/null
++++ b/test/offscreen_policy.c
+@@ -0,0 +1,79 @@
++#include "ass_offscreen.h"
++
++#include <limits.h>
++#include <stdio.h>
++
++static int check_decision(const char *name,
++                          ASS_BitmapClipDecision actual,
++                          ASS_BitmapClipDecision expected)
++{
++    if (actual == expected)
++        return 0;
++
++    fprintf(stderr, "%s: got %d, expected %d\n", name, actual, expected);
++    return 1;
++}
++
++int main(void)
++{
++    int failed = 0;
++
++    failed += check_decision(
++        "fully invisible bitmap",
++        ass_bitmap_clip_decision(2048, 1024, 0, 1024),
++        ASS_BITMAP_CULL);
++    failed += check_decision(
++        "ordinary scrolling glyph",
++        ass_bitmap_clip_decision(64, 64, 16, 64),
++        ASS_BITMAP_KEEP_FULL);
++    failed += check_decision(
++        "bitmap at size threshold",
++        ass_bitmap_clip_decision(256, 256, 128, 256),
++        ASS_BITMAP_KEEP_FULL);
++    failed += check_decision(
++        "large bitmap with small offscreen portion",
++        ass_bitmap_clip_decision(512, 512, 448, 512),
++        ASS_BITMAP_KEEP_FULL);
++    failed += check_decision(
++        "large bitmap with meaningful offscreen portion",
++        ass_bitmap_clip_decision(512, 512, 384, 512),
++        ASS_BITMAP_CLIP_PARTIAL);
++    failed += check_decision(
++        "oversized mostly offscreen bitmap",
++        ass_bitmap_clip_decision(4096, 2048, 512, 2048),
++        ASS_BITMAP_CLIP_PARTIAL);
++    failed += check_decision(
++        "fully visible large bitmap",
++        ass_bitmap_clip_decision(1024, 1024, 1024, 1024),
++        ASS_BITMAP_KEEP_FULL);
++    failed += check_decision(
++        "largest transformed bounds do not overflow",
++        ass_bitmap_clip_decision(UINT32_MAX, UINT32_MAX,
++                                 UINT32_MAX, UINT32_MAX / 2),
++        ASS_BITMAP_CLIP_PARTIAL);
++
++    int32_t min = -100, max = 100;
++    ass_expand_clip_axis(&min, &max, 20, 65);
++    if (min != -122 || max != 120) {
++        fprintf(stderr, "positive shadow expansion: got [%d, %d]\n", min, max);
++        failed++;
++    }
++
++    min = -100;
++    max = 100;
++    ass_expand_clip_axis(&min, &max, 20, -64);
++    if (min != -120 || max != 121) {
++        fprintf(stderr, "negative shadow expansion: got [%d, %d]\n", min, max);
++        failed++;
++    }
++
++    min = INT32_MIN + 10;
++    max = INT32_MAX - 10;
++    ass_expand_clip_axis(&min, &max, 20, INT32_MIN);
++    if (min != INT32_MIN || max != INT32_MAX) {
++        fprintf(stderr, "saturating expansion: got [%d, %d]\n", min, max);
++        failed++;
++    }
++
++    return failed != 0;
++}

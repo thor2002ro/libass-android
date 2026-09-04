@@ -1,5 +1,5 @@
 diff --git a/configure.ac b/configure.ac
-index 50085c4..543ec38 100644
+index 50085c4ab7b6b0ba2ff697674ecdd6115344419f..543ec389ea5c76130b3bc83e29e85c62d93b666f 100644
 --- a/configure.ac
 +++ b/configure.ac
 @@ -13,10 +13,10 @@ AM_PROG_CC_C_O
@@ -100,7 +100,7 @@ index 50085c4..543ec38 100644
          AC_MSG_RESULT([yes])
          AC_MSG_CHECKING([for Win32 desktop APIs])
 diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
-index 6296863..e1ee021 100644
+index e6554e28d5e71f8263346e36d8626436f19ec2f8..72ec4dd66512af8bd3157e3e0f44e6f5233999de 100644
 --- a/libass/Makefile_library.am
 +++ b/libass/Makefile_library.am
 @@ -9,7 +9,7 @@ noinst_LTLIBRARIES += libass/libass_internal.la
@@ -113,7 +113,7 @@ index 6296863..e1ee021 100644
      libass/ass_types.h libass/ass.h libass/ass_priv.h libass/ass.c \
      libass/ass_library.h libass/ass_library.c \
 diff --git a/libass/ass.h b/libass/ass.h
-index a1b546b..c993192 100644
+index a1b546b8431a038ccfdb8a4e35fe31c79a705e45..c993192c38fee19144e9d8568ae6ba726506f096 100644
 --- a/libass/ass.h
 +++ b/libass/ass.h
 @@ -24,7 +24,7 @@
@@ -147,7 +147,7 @@ index a1b546b..c993192 100644
   * \brief Set the source image size in pixels.
   * This affects some ASS tags like e.g. 3D transforms and
 diff --git a/libass/ass_cache.c b/libass/ass_cache.c
-index 47069c1..999ea69 100644
+index a4f8fe513f52ff426765bf815dc46d52029ba177..9d86a770445bbf6bc0619e4e2b38a2a72e98f21d 100644
 --- a/libass/ass_cache.c
 +++ b/libass/ass_cache.c
 @@ -23,12 +23,12 @@
@@ -381,7 +381,7 @@ index 47069c1..999ea69 100644
  };
  
  #define CACHE_ALIGN 8
-@@ -374,70 +417,211 @@ Cache *ass_cache_create(const CacheDesc *desc)
+@@ -374,86 +417,229 @@ Cache *ass_cache_create(const CacheDesc *desc)
          return NULL;
      }
  
@@ -395,6 +395,7 @@ index 47069c1..999ea69 100644
      return cache;
  }
  
+-static void *cache_get(Cache *cache, void *key, void *priv, bool create)
 +bool ass_cache_client_set_init(CacheClientSet *set)
 +{
 +    memset(set, 0, sizeof(*set));
@@ -470,12 +471,8 @@ index 47069c1..999ea69 100644
 +    return client;
 +}
 +
- // Retrieve a value corresponding to a particular cache key,
- // creating one if it does not already exist.
- // The returned item is guaranteed to be valid until the next ass_cache_cut call;
- // to extend its lifetime further, call ass_cache_inc_ref().
--void *ass_cache_get(Cache *cache, void *key, void *priv)
-+void *ass_cache_get(Cache *cache, CacheClient *client, void *key, void *priv)
++static void *cache_get(Cache *cache, CacheClient *client, void *key,
++                       void *priv, bool create)
  {
      const CacheDesc *desc = cache->desc;
      size_t key_offs = CACHE_ITEM_SIZE + align_cache(desc->value_size);
@@ -519,44 +516,50 @@ index 47069c1..999ea69 100644
 +                item->promote_next = client->promote_first;
 +                client->promote_first = item;
              }
+-            if (create)
 +        }
 +
-+        if (!new_item)
-             desc->key_move_func(NULL, key);
-+        else if (desc->key_destruct_func)
-+            desc->key_destruct_func(key);
- 
--            return (char *) item + CACHE_ITEM_SIZE;
++        if (create) {
++            if (!new_item)
+                 desc->key_move_func(NULL, key);
++            else if (desc->key_destruct_func)
++                desc->key_destruct_func(key);
++        }
++
 +#if ENABLE_THREADS
 +        if (!atomic_load_explicit(&item->size, memory_order_acquire)) {
 +            pthread_mutex_lock(&item->creating_client->mutex);
-+
+ 
+-            return (char *) item + CACHE_ITEM_SIZE;
 +            while (!atomic_load_explicit(&item->size, memory_order_relaxed))
 +                pthread_cond_wait(&item->creating_client->cond, &item->creating_client->mutex);
 +
 +            pthread_mutex_unlock(&item->creating_client->mutex);
          }
 -        item = item->next;
--    }
- 
--    item = malloc(key_offs + desc->key_size);
--    if (!item) {
--        desc->key_move_func(NULL, key);
--        return NULL;
++
 +        free(new_item);
 +#endif
 +
 +        return (char *) item + CACHE_ITEM_SIZE;
      }
+ 
++    stop_at = start;
++
+     if (!create)
+         return NULL;
+ 
+-    item = malloc(key_offs + desc->key_size);
+-    if (!item) {
+-        desc->key_move_func(NULL, key);
+-        return NULL;
+-    }
 -    item->cache = cache;
 -    item->desc = desc;
 -    void *new_key = (char *) item + key_offs;
 -    if (!desc->key_move_func(new_key, key)) {
 -        free(item);
 -        return NULL;
-+
-+    stop_at = start;
-+
 +    if (!new_item) {
 +        // Risk of cache miss. Set up a new item to insert if we win the race.
 +        new_item = malloc(key_offs + desc->key_size);
@@ -639,7 +642,27 @@ index 47069c1..999ea69 100644
      return value;
  }
  
-@@ -449,9 +633,13 @@ void *ass_cache_key(void *value)
+ // Retrieve an existing value without taking ownership of the key.
+-void *ass_cache_peek(Cache *cache, const void *key)
++void *ass_cache_peek(Cache *cache, CacheClient *client, const void *key)
+ {
+-    return cache_get(cache, (void *) key, NULL, false);
++    return cache_get(cache, client, (void *) key, NULL, false);
+ }
+ 
+ // Retrieve a value corresponding to a particular cache key,
+ // creating one if it does not already exist.
+ // The returned item is guaranteed to be valid until the next ass_cache_cut call;
+ // to extend its lifetime further, call ass_cache_inc_ref().
+-void *ass_cache_get(Cache *cache, void *key, void *priv)
++void *ass_cache_get(Cache *cache, CacheClient *client, void *key, void *priv)
+ {
+-    return cache_get(cache, key, priv, true);
++    return cache_get(cache, client, key, priv, true);
+ }
+ 
+ void *ass_cache_key(void *value)
+@@ -464,9 +650,13 @@ void *ass_cache_key(void *value)
  
  static inline void destroy_item(const CacheDesc *desc, CacheItem *item)
  {
@@ -655,7 +678,7 @@ index 47069c1..999ea69 100644
      free(item);
  }
  
-@@ -460,8 +648,17 @@ void ass_cache_inc_ref(void *value)
+@@ -475,8 +665,17 @@ void ass_cache_inc_ref(void *value)
      if (!value)
          return;
      CacheItem *item = value_to_item(value);
@@ -675,7 +698,7 @@ index 47069c1..999ea69 100644
  }
  
  void ass_cache_dec_ref(void *value)
-@@ -469,72 +666,118 @@ void ass_cache_dec_ref(void *value)
+@@ -484,72 +683,118 @@ void ass_cache_dec_ref(void *value)
      if (!value)
          return;
      CacheItem *item = value_to_item(value);
@@ -835,7 +858,7 @@ index 47069c1..999ea69 100644
  
  void ass_cache_done(Cache *cache)
 diff --git a/libass/ass_cache.h b/libass/ass_cache.h
-index 53eac20..e90ece7 100644
+index 105f878e4dc3702307e7337ac3ad4263216c3033..965a81637f30b99c14bf45a041a62266a75812cc 100644
 --- a/libass/ass_cache.h
 +++ b/libass/ass_cache.h
 @@ -24,8 +24,10 @@
@@ -861,7 +884,7 @@ index 53eac20..e90ece7 100644
  
  // cache hash keys
  
-@@ -92,17 +95,32 @@ typedef struct
+@@ -92,18 +95,33 @@ typedef struct
      HashFunction hash_func;
      HashCompare compare_func;
      CacheKeyMove key_move_func;
@@ -884,11 +907,13 @@ index 53eac20..e90ece7 100644
 +} CacheClientSet;
 +
  Cache *ass_cache_create(const CacheDesc *desc);
+-void *ass_cache_peek(Cache *cache, const void *key);
 -void *ass_cache_get(Cache *cache, void *key, void *priv);
 +bool ass_cache_client_set_init(CacheClientSet *set);
 +void ass_cache_client_set_clear(CacheClientSet *set);
 +void ass_cache_client_set_done(CacheClientSet *set);
 +CacheClient *ass_cache_client_create(CacheClientSet *set);
++void *ass_cache_peek(Cache *cache, CacheClient *client, const void *key);
 +void *ass_cache_get(Cache *cache, CacheClient *client, void *key, void *priv);
  void *ass_cache_key(void *value);
  void ass_cache_inc_ref(void *value);
@@ -898,7 +923,7 @@ index 53eac20..e90ece7 100644
  void ass_cache_empty(Cache *cache);
  void ass_cache_done(Cache *cache);
 diff --git a/libass/ass_font.c b/libass/ass_font.c
-index 0b3070a..89255ed 100644
+index 0b3070a5c6bd78350c148685cc9f44cced3bfede..89255ed62588ede3d5230dbc72000d9b44373a3e 100644
 --- a/libass/ass_font.c
 +++ b/libass/ass_font.c
 @@ -505,20 +505,25 @@ static int add_face(ASS_FontSelector *fontsel, ASS_Font *font, uint32_t ch)
@@ -1063,7 +1088,7 @@ index 0b3070a..89255ed 100644
  
  /**
 diff --git a/libass/ass_font.h b/libass/ass_font.h
-index 2388249..6fc0ae8 100644
+index 23882498787d3d263a292e9f3db196af17796a92..6fc0ae8a2ab58aec58e63317e1ca5bbb2d134848 100644
 --- a/libass/ass_font.h
 +++ b/libass/ass_font.h
 @@ -31,6 +31,7 @@ typedef struct ass_font ASS_Font;
@@ -1103,7 +1128,7 @@ index 2388249..6fc0ae8 100644
                             FT_Face face, unsigned flags);
  
 diff --git a/libass/ass_fontselect.c b/libass/ass_fontselect.c
-index 2303876..57f6c49 100644
+index 23038765261be28f07edca909c8379ae61bc4c2e..57f6c495695c0333a06cfc46d8be249462e1f75a 100644
 --- a/libass/ass_fontselect.c
 +++ b/libass/ass_fontselect.c
 @@ -101,6 +101,10 @@ struct font_selector {
@@ -1154,7 +1179,7 @@ index 2303876..57f6c49 100644
                    ASS_FontProviderMetaData *meta)
  {
 diff --git a/libass/ass_fontselect.h b/libass/ass_fontselect.h
-index 9cd8cfe..ae354d0 100644
+index 9cd8cfe496bdc5f22dfa0b70a84111a744e32a62..ae354d067ab8121e32e6fe56c055801c83821844 100644
 --- a/libass/ass_fontselect.h
 +++ b/libass/ass_fontselect.h
 @@ -253,6 +253,9 @@ char *ass_font_select(ASS_FontSelector *priv,
@@ -1168,7 +1193,7 @@ index 9cd8cfe..ae354d0 100644
  ASS_FontProvider *ass_font_provider_new(ASS_FontSelector *selector,
          ASS_FontProviderFuncs *funcs, void *data);
 diff --git a/libass/ass_library.c b/libass/ass_library.c
-index a27aada..d4b61a8 100644
+index a27aadaafd2f19bf1c073a68f7760d3c65840178..d4b61a852d9dfe9950c4234ce8773d9db4c7832f 100644
 --- a/libass/ass_library.c
 +++ b/libass/ass_library.c
 @@ -45,8 +45,16 @@ static void ass_msg_handler(int level, const char *fmt, va_list va, void *data)
@@ -1211,7 +1236,7 @@ index a27aada..d4b61a8 100644
  }
  
 diff --git a/libass/ass_library.h b/libass/ass_library.h
-index 0a97960..9bcc671 100644
+index 0a97960779cf5d2dc9022183a2f9104a60135673..9bcc6710e8bfb24bd075d8cbd6d82b483eb2ab4a 100644
 --- a/libass/ass_library.h
 +++ b/libass/ass_library.h
 @@ -22,6 +22,7 @@
@@ -1235,7 +1260,7 @@ index 0a97960..9bcc671 100644
  
  char *ass_load_file(struct ass_library *library, const char *fname, FileNameSource hint, size_t *bufsize);
 diff --git a/libass/ass_parse.c b/libass/ass_parse.c
-index 99833c5..b74c6b8 100644
+index 99833c52693496f1f72731103c186d6dca750aa8..b74c6b80d8a740b524491fff5045e14b0d6ff144 100644
 --- a/libass/ass_parse.c
 +++ b/libass/ass_parse.c
 @@ -111,7 +111,7 @@ void ass_update_font(RenderContext *state)
@@ -1248,7 +1273,7 @@ index 99833c5..b74c6b8 100644
  
  /**
 diff --git a/libass/ass_render.c b/libass/ass_render.c
-index b2a77ed..ed504c6 100644
+index a43e735d57e8d73c17733c7386238ef01b752838..7d20e8ffe3f856babce27a5d3c1b5a82657b421e 100644
 --- a/libass/ass_render.c
 +++ b/libass/ass_render.c
 @@ -28,6 +28,11 @@
@@ -1262,8 +1287,8 @@ index b2a77ed..ed504c6 100644
 +
  #include "ass.h"
  #include "ass_outline.h"
- #include "ass_render.h"
-@@ -82,7 +87,11 @@ static bool render_context_init(RenderContext *state, ASS_Renderer *priv)
+ #include "ass_offscreen.h"
+@@ -83,7 +88,11 @@ static bool render_context_init(RenderContext *state, ASS_Renderer *priv)
      if (!text_info_init(&state->text_info))
          return false;
  
@@ -1276,7 +1301,7 @@ index b2a77ed..ed504c6 100644
          return false;
  
      return ass_rasterizer_init(&priv->engine, &state->rasterizer, RASTERIZER_PRECISION);
-@@ -145,9 +154,15 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
+@@ -146,9 +155,15 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
          !priv->cache.face_size_metrics_cache || !priv->cache.metrics_cache)
          goto fail;
  
@@ -1295,7 +1320,7 @@ index b2a77ed..ed504c6 100644
  
      if (!render_context_init(&priv->state, priv))
          goto fail;
-@@ -160,6 +175,35 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
+@@ -161,6 +176,35 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
      ass_shaper_info(library);
      priv->settings.shaper = ASS_SHAPING_COMPLEX;
  
@@ -1331,7 +1356,7 @@ index b2a77ed..ed504c6 100644
      ass_msg(library, MSGL_V, "Initialized");
  
      return priv;
-@@ -171,20 +215,54 @@ fail:
+@@ -172,20 +216,54 @@ fail:
      return NULL;
  }
  
@@ -1386,7 +1411,7 @@ index b2a77ed..ed504c6 100644
  
      if (render_priv->fontselect)
          ass_fontselect_free(render_priv->fontselect);
-@@ -192,8 +270,6 @@ void ass_renderer_done(ASS_Renderer *render_priv)
+@@ -193,8 +271,6 @@ void ass_renderer_done(ASS_Renderer *render_priv)
          FT_Done_FreeType(render_priv->ftlibrary);
      free(render_priv->eimg);
  
@@ -1395,7 +1420,7 @@ index b2a77ed..ed504c6 100644
      free(render_priv->settings.default_font);
      free(render_priv->settings.default_family);
  
-@@ -897,12 +973,12 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
+@@ -944,12 +1020,12 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
  
      ASS_Vector pos;
      BitmapHashKey key;
@@ -1410,7 +1435,7 @@ index b2a77ed..ed504c6 100644
      if (!clip_bm)
          return;
  
-@@ -1361,7 +1437,7 @@ get_outline_glyph(RenderContext *state, GlyphInfo *info)
+@@ -1408,7 +1484,7 @@ get_outline_glyph(RenderContext *state, GlyphInfo *info)
      if (info->drawing_text.str) {
          key.type = OUTLINE_DRAWING;
          key.u.drawing.text = info->drawing_text;
@@ -1419,7 +1444,7 @@ index b2a77ed..ed504c6 100644
          if (!val || !val->valid)
              return;
  
-@@ -1384,7 +1460,7 @@ get_outline_glyph(RenderContext *state, GlyphInfo *info)
+@@ -1431,7 +1507,7 @@ get_outline_glyph(RenderContext *state, GlyphInfo *info)
          k->italic = info->italic;
          k->flags = info->flags;
  
@@ -1428,7 +1453,7 @@ index b2a77ed..ed504c6 100644
          if (!val || !val->valid)
              return;
  
-@@ -1422,16 +1498,22 @@ size_t ass_outline_construct(void *key, void *value, void *priv)
+@@ -1469,16 +1545,22 @@ size_t ass_outline_construct(void *key, void *value, void *priv)
      case OUTLINE_GLYPH:
          {
              GlyphHashKey *k = &outline_key->u.glyph;
@@ -1453,31 +1478,42 @@ index b2a77ed..ed504c6 100644
              break;
          }
      case OUTLINE_DRAWING:
-@@ -1643,7 +1725,7 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
-     if (!quantize_transform(m, pos, offset, first, potentially_clipped ? &clip_rect : NULL, &key))
-         return;
+@@ -1631,7 +1713,8 @@ static Bitmap *get_cached_bitmap(RenderContext *state, BitmapHashKey *key,
+                                  const ASS_Rect *bounds)
+ {
+     if (!bounds)
+-        return ass_cache_get(state->renderer->cache.bitmap_cache, key, state);
++        return ass_cache_get(state->renderer->cache.bitmap_cache,
++                             state->cache_client, key, state);
  
--    info->bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
-+    info->bm = ass_cache_get(render_priv->cache.bitmap_cache, state->cache_client, &key, state);
-     if (!info->bm || !info->bm->buffer)
-         info->bm = NULL;
+     int64_t width = (int64_t) bounds->x_max - bounds->x_min;
+     int64_t height = (int64_t) bounds->y_max - bounds->y_min;
+@@ -1648,13 +1731,13 @@ static Bitmap *get_cached_bitmap(RenderContext *state, BitmapHashKey *key,
+         return NULL;
  
-@@ -1762,12 +1844,12 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+     Cache *cache = state->renderer->cache.bitmap_cache;
+-    Bitmap *bitmap = ass_cache_peek(cache, key);
++    Bitmap *bitmap = ass_cache_peek(cache, state->cache_client, key);
+     if (bitmap)
+         return bitmap;
+ 
+     if (decision == ASS_BITMAP_CLIP_PARTIAL)
+         set_bitmap_clip(key, pos, clip, bounds);
+-    return ass_cache_get(cache, key, state);
++    return ass_cache_get(cache, state->cache_client, key, state);
+ }
+ 
+ /**
+@@ -1839,7 +1922,7 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
          }
      }
  
 -    key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
 +    key.outline = ass_cache_get(render_priv->cache.outline_cache, state->cache_client, &ol_key, render_priv);
      if (!key.outline || !key.outline->valid ||
-             !quantize_transform(m, pos_o, offset, false, potentially_clipped ? &clip_rect : NULL, &key))
+             !quantize_transform(m, pos_o, offset, false, NULL, &key))
          return;
- 
--    info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
-+    info->bm_o = ass_cache_get(render_priv->cache.bitmap_cache, state->cache_client, &key, state);
-     if (!info->bm_o || !info->bm_o->buffer) {
-         info->bm_o = NULL;
-         *pos_o = *pos;
-@@ -2859,7 +2941,7 @@ static void render_and_combine_glyphs(RenderContext *state,
+@@ -2948,7 +3031,7 @@ static void render_and_combine_glyphs(RenderContext *state,
          key.filter = info->filter;
          key.bitmap_count = info->bitmap_count;
          key.bitmaps = info->bitmaps;
@@ -1486,7 +1522,7 @@ index b2a77ed..ed504c6 100644
          if (!val)
              continue;
  
-@@ -3055,6 +3137,21 @@ static void add_background(RenderContext *state, EventImages *event_images)
+@@ -3144,6 +3227,21 @@ static void add_background(RenderContext *state, EventImages *event_images)
      }
  }
  
@@ -1508,7 +1544,7 @@ index b2a77ed..ed504c6 100644
  /**
   * \brief Main ass rendering function, glues everything together
   * \param event event to render
-@@ -3062,9 +3159,10 @@ static void add_background(RenderContext *state, EventImages *event_images)
+@@ -3151,9 +3249,10 @@ static void add_background(RenderContext *state, EventImages *event_images)
   * Process event, appending resulting ASS_Image's to images_root.
   */
  static bool
@@ -1521,7 +1557,7 @@ index b2a77ed..ed504c6 100644
      ASS_Renderer *render_priv = state->renderer;
      if (event->Style >= render_priv->track->n_styles) {
          ass_msg(render_priv->library, MSGL_WARN, "No style found");
-@@ -3075,6 +3173,8 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+@@ -3164,6 +3263,8 @@ ass_render_event(RenderContext *state, ASS_Event *event,
          return false;
      }
  
@@ -1530,7 +1566,7 @@ index b2a77ed..ed504c6 100644
      free_render_context(state);
      init_render_context(state, event);
  
-@@ -3261,7 +3361,6 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+@@ -3350,7 +3451,6 @@ ass_render_event(RenderContext *state, ASS_Event *event,
  
      render_and_combine_glyphs(state, device_x, device_y);
  
@@ -1538,7 +1574,7 @@ index b2a77ed..ed504c6 100644
      // VSFilter does *not* shift lines with a border > margin to be within the
      // frame, so negative values for top and left may occur
      event_images->top = device_y - text_info->lines[0].asc - text_info->border_top;
-@@ -3274,7 +3373,6 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+@@ -3363,7 +3463,6 @@ ass_render_event(RenderContext *state, ASS_Event *event,
          + 2 * text_info->border_x + 0.5;
      event_images->detect_collisions = state->detect_collisions;
      event_images->shift_direction = (valign == VALIGN_SUB) ? -1 : 1;
@@ -1546,7 +1582,7 @@ index b2a77ed..ed504c6 100644
      event_images->imgs = render_text(state);
  
      if (state->border_style == 4)
-@@ -3286,6 +3384,69 @@ ass_render_event(RenderContext *state, ASS_Event *event,
+@@ -3375,6 +3474,69 @@ ass_render_event(RenderContext *state, ASS_Event *event,
      return true;
  }
  
@@ -1616,7 +1652,7 @@ index b2a77ed..ed504c6 100644
  /**
   * \brief Check cache limits and reset cache if they are exceeded
   */
-@@ -3296,21 +3457,6 @@ static void check_cache_limits(ASS_Renderer *priv, CacheStore *cache)
+@@ -3385,21 +3547,6 @@ static void check_cache_limits(ASS_Renderer *priv, CacheStore *cache)
      ass_cache_cut(cache->outline_cache, cache->glyph_max);
  }
  
@@ -1638,7 +1674,7 @@ index b2a77ed..ed504c6 100644
  /**
   * \brief Start a new frame
   */
-@@ -3342,8 +3488,6 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
+@@ -3431,8 +3578,6 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
              render_priv->fontselect, render_priv->num_emfonts);
      }
  
@@ -1647,7 +1683,7 @@ index b2a77ed..ed504c6 100644
      // PAR correction
      double par = render_priv->settings.par;
      bool lr_track = track->LayoutResX > 0 && track->LayoutResY > 0;
-@@ -3363,6 +3507,7 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
+@@ -3452,6 +3597,7 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
      render_priv->prev_images_root = render_priv->images_root;
      render_priv->images_root = NULL;
  
@@ -1655,7 +1691,7 @@ index b2a77ed..ed504c6 100644
      check_cache_limits(render_priv, &render_priv->cache);
  
      return true;
-@@ -3372,6 +3517,12 @@ static int cmp_event_layer(const void *p1, const void *p2)
+@@ -3461,6 +3607,12 @@ static int cmp_event_layer(const void *p1, const void *p2)
  {
      ASS_Event *e1 = ((EventImages *) p1)->event;
      ASS_Event *e2 = ((EventImages *) p2)->event;
@@ -1668,7 +1704,7 @@ index b2a77ed..ed504c6 100644
      if (e1->Layer < e2->Layer)
          return -1;
      if (e1->Layer > e2->Layer)
-@@ -3610,6 +3761,43 @@ static int ass_detect_change(ASS_Renderer *priv)
+@@ -3699,6 +3851,43 @@ static int ass_detect_change(ASS_Renderer *priv)
      return diff;
  }
  
@@ -1712,7 +1748,7 @@ index b2a77ed..ed504c6 100644
  /**
   * \brief free a single image.
   * \param img image as returned by ass_render_frame().
-@@ -3660,8 +3848,37 @@ ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
+@@ -3749,8 +3938,37 @@ ASS_Image *ass_render_frame(ASS_Renderer *priv, ASS_Track *track,
                      realloc(priv->eimg,
                              priv->eimg_size * sizeof(EventImages));
              }
@@ -1753,7 +1789,7 @@ index b2a77ed..ed504c6 100644
      }
  
 diff --git a/libass/ass_render.h b/libass/ass_render.h
-index 8f85e8e..97a53e1 100644
+index 8f85e8e274c293e43b48fd1955e9dd9b34d9851b..97a53e1384ffdfe3b530c9cf2102d37db34ff619 100644
 --- a/libass/ass_render.h
 +++ b/libass/ass_render.h
 @@ -20,6 +20,8 @@
@@ -1823,7 +1859,7 @@ index 8f85e8e..97a53e1 100644
  
  typedef struct render_priv {
 diff --git a/libass/ass_render_api.c b/libass/ass_render_api.c
-index ee1620a..5922084 100644
+index ee1620ad1d1e26d232e96de8182fb84a018e1041..59220841ce6b10052050015fe02be1057700cda5 100644
 --- a/libass/ass_render_api.c
 +++ b/libass/ass_render_api.c
 @@ -31,6 +31,7 @@ static void ass_reconfigure(ASS_Renderer *priv)
@@ -1858,7 +1894,7 @@ index ee1620a..5922084 100644
  {
      if (w <= 0 || h <= 0 || w > FFMIN(INT_MAX, SIZE_MAX) / h)
 diff --git a/libass/ass_shaper.c b/libass/ass_shaper.c
-index d733d5d..070a35e 100644
+index d733d5d0aeac7dd7888d66c3e3018b9d0d97c251..070a35e2bb70f01afe6150c6fb9f2f3412a80f3e 100644
 --- a/libass/ass_shaper.c
 +++ b/libass/ass_shaper.c
 @@ -65,6 +65,7 @@ struct ass_shaper {
@@ -2073,7 +2109,7 @@ index d733d5d..070a35e 100644
      hb_font_funcs_t *funcs = shaper->font_funcs = hb_font_funcs_create();
      if (hb_font_funcs_is_immutable(funcs))
 diff --git a/libass/ass_shaper.h b/libass/ass_shaper.h
-index 06f868d..3167c42 100644
+index 06f868d84af44d7f26a38746ba02a14f20db440d..3167c42c82299a2a907d6554264eea49fee7a1c2 100644
 --- a/libass/ass_shaper.h
 +++ b/libass/ass_shaper.h
 @@ -31,7 +31,7 @@ typedef struct ass_shaper ASS_Shaper;
@@ -2087,28 +2123,10 @@ index 06f868d..3167c42 100644
  void ass_shaper_set_kerning(ASS_Shaper *shaper, bool kern);
 diff --git a/libass/ass_threading.h b/libass/ass_threading.h
 new file mode 100644
-index 0000000..2adbfb4
+index 0000000000000000000000000000000000000000..2adbfb44434366b96a12b4ed9233c20e040e6c9c
 --- /dev/null
 +++ b/libass/ass_threading.h
-@@ -0,0 +1,360 @@
-+/*
-+ * Copyright (C) 2023 libass contributors
-+ *
-+ * This file is part of libass.
-+ *
-+ * Permission to use, copy, modify, and distribute this software for any
-+ * purpose with or without fee is hereby granted, provided that the above
-+ * copyright notice and this permission notice appear in all copies.
-+ *
-+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-+ */
-+
+@@ -0,0 +1,342 @@
 +#ifndef LIBASS_THREADING_H
 +#define LIBASS_THREADING_H
 +
@@ -2452,7 +2470,7 @@ index 0000000..2adbfb4
 +
 +#endif                          /* LIBASS_THREADING_H */
 diff --git a/libass/ass_utils.c b/libass/ass_utils.c
-index d1e4c8f..71d0399 100644
+index d1e4c8f167c23d641018ee0731813923d566be59..71d0399329e1db54d793c9bff50a9f5cab9fbaa8 100644
 --- a/libass/ass_utils.c
 +++ b/libass/ass_utils.c
 @@ -29,6 +29,7 @@
@@ -2485,7 +2503,7 @@ index d1e4c8f..71d0399 100644
  
  unsigned ass_utf8_get_char(char **str)
 diff --git a/libass/ass_utils.h b/libass/ass_utils.h
-index f6d60d3..a61dd3a 100644
+index f6d60d33e3fb19f9838c1de3d6856e0b76fdc5b6..a61dd3a14a628639a50c044a1b70f438ca7bc3af 100644
 --- a/libass/ass_utils.h
 +++ b/libass/ass_utils.h
 @@ -55,6 +55,18 @@
@@ -2508,7 +2526,7 @@ index f6d60d3..a61dd3a 100644
      #define ASSUME(x) assert(x)
  #elif __has_builtin(__builtin_assume)
 diff --git a/libass/libass.sym b/libass/libass.sym
-index 4cc6215..a8c423e 100644
+index 4cc6215e28bd9ef0b7015970a3b525ad0c1d32db..a8c423e3d5b46d6f00e473aa9e21e4c0a3fa15b9 100644
 --- a/libass/libass.sym
 +++ b/libass/libass.sym
 @@ -8,6 +8,7 @@ ass_renderer_init
@@ -2519,536 +2537,8 @@ index 4cc6215..a8c423e 100644
  ass_set_margins
  ass_set_use_margins
  ass_set_aspect_ratio
-diff --git a/m4/ax_pthread.m4 b/m4/ax_pthread.m4
-new file mode 100644
-index 0000000..9f35d13
---- /dev/null
-+++ b/m4/ax_pthread.m4
-@@ -0,0 +1,522 @@
-+# ===========================================================================
-+#        https://www.gnu.org/software/autoconf-archive/ax_pthread.html
-+# ===========================================================================
-+#
-+# SYNOPSIS
-+#
-+#   AX_PTHREAD([ACTION-IF-FOUND[, ACTION-IF-NOT-FOUND]])
-+#
-+# DESCRIPTION
-+#
-+#   This macro figures out how to build C programs using POSIX threads. It
-+#   sets the PTHREAD_LIBS output variable to the threads library and linker
-+#   flags, and the PTHREAD_CFLAGS output variable to any special C compiler
-+#   flags that are needed. (The user can also force certain compiler
-+#   flags/libs to be tested by setting these environment variables.)
-+#
-+#   Also sets PTHREAD_CC and PTHREAD_CXX to any special C compiler that is
-+#   needed for multi-threaded programs (defaults to the value of CC
-+#   respectively CXX otherwise). (This is necessary on e.g. AIX to use the
-+#   special cc_r/CC_r compiler alias.)
-+#
-+#   NOTE: You are assumed to not only compile your program with these flags,
-+#   but also to link with them as well. For example, you might link with
-+#   $PTHREAD_CC $CFLAGS $PTHREAD_CFLAGS $LDFLAGS ... $PTHREAD_LIBS $LIBS
-+#   $PTHREAD_CXX $CXXFLAGS $PTHREAD_CFLAGS $LDFLAGS ... $PTHREAD_LIBS $LIBS
-+#
-+#   If you are only building threaded programs, you may wish to use these
-+#   variables in your default LIBS, CFLAGS, and CC:
-+#
-+#     LIBS="$PTHREAD_LIBS $LIBS"
-+#     CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-+#     CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"
-+#     CC="$PTHREAD_CC"
-+#     CXX="$PTHREAD_CXX"
-+#
-+#   In addition, if the PTHREAD_CREATE_JOINABLE thread-attribute constant
-+#   has a nonstandard name, this macro defines PTHREAD_CREATE_JOINABLE to
-+#   that name (e.g. PTHREAD_CREATE_UNDETACHED on AIX).
-+#
-+#   Also HAVE_PTHREAD_PRIO_INHERIT is defined if pthread is found and the
-+#   PTHREAD_PRIO_INHERIT symbol is defined when compiling with
-+#   PTHREAD_CFLAGS.
-+#
-+#   ACTION-IF-FOUND is a list of shell commands to run if a threads library
-+#   is found, and ACTION-IF-NOT-FOUND is a list of commands to run it if it
-+#   is not found. If ACTION-IF-FOUND is not specified, the default action
-+#   will define HAVE_PTHREAD.
-+#
-+#   Please let the authors know if this macro fails on any platform, or if
-+#   you have any other suggestions or comments. This macro was based on work
-+#   by SGJ on autoconf scripts for FFTW (http://www.fftw.org/) (with help
-+#   from M. Frigo), as well as ac_pthread and hb_pthread macros posted by
-+#   Alejandro Forero Cuervo to the autoconf macro repository. We are also
-+#   grateful for the helpful feedback of numerous users.
-+#
-+#   Updated for Autoconf 2.68 by Daniel Richard G.
-+#
-+# LICENSE
-+#
-+#   Copyright (c) 2008 Steven G. Johnson <stevenj@alum.mit.edu>
-+#   Copyright (c) 2011 Daniel Richard G. <skunk@iSKUNK.ORG>
-+#   Copyright (c) 2019 Marc Stevens <marc.stevens@cwi.nl>
-+#
-+#   This program is free software: you can redistribute it and/or modify it
-+#   under the terms of the GNU General Public License as published by the
-+#   Free Software Foundation, either version 3 of the License, or (at your
-+#   option) any later version.
-+#
-+#   This program is distributed in the hope that it will be useful, but
-+#   WITHOUT ANY WARRANTY; without even the implied warranty of
-+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
-+#   Public License for more details.
-+#
-+#   You should have received a copy of the GNU General Public License along
-+#   with this program. If not, see <https://www.gnu.org/licenses/>.
-+#
-+#   As a special exception, the respective Autoconf Macro's copyright owner
-+#   gives unlimited permission to copy, distribute and modify the configure
-+#   scripts that are the output of Autoconf when processing the Macro. You
-+#   need not follow the terms of the GNU General Public License when using
-+#   or distributing such scripts, even though portions of the text of the
-+#   Macro appear in them. The GNU General Public License (GPL) does govern
-+#   all other use of the material that constitutes the Autoconf Macro.
-+#
-+#   This special exception to the GPL applies to versions of the Autoconf
-+#   Macro released by the Autoconf Archive. When you make and distribute a
-+#   modified version of the Autoconf Macro, you may extend this special
-+#   exception to the GPL to apply to your modified version as well.
-+
-+#serial 31
-+
-+AU_ALIAS([ACX_PTHREAD], [AX_PTHREAD])
-+AC_DEFUN([AX_PTHREAD], [
-+AC_REQUIRE([AC_CANONICAL_HOST])
-+AC_REQUIRE([AC_PROG_CC])
-+AC_REQUIRE([AC_PROG_SED])
-+AC_LANG_PUSH([C])
-+ax_pthread_ok=no
-+
-+# We used to check for pthread.h first, but this fails if pthread.h
-+# requires special compiler flags (e.g. on Tru64 or Sequent).
-+# It gets checked for in the link test anyway.
-+
-+# First of all, check if the user has set any of the PTHREAD_LIBS,
-+# etcetera environment variables, and if threads linking works using
-+# them:
-+if test "x$PTHREAD_CFLAGS$PTHREAD_LIBS" != "x"; then
-+        ax_pthread_save_CC="$CC"
-+        ax_pthread_save_CFLAGS="$CFLAGS"
-+        ax_pthread_save_LIBS="$LIBS"
-+        AS_IF([test "x$PTHREAD_CC" != "x"], [CC="$PTHREAD_CC"])
-+        AS_IF([test "x$PTHREAD_CXX" != "x"], [CXX="$PTHREAD_CXX"])
-+        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-+        LIBS="$PTHREAD_LIBS $LIBS"
-+        AC_MSG_CHECKING([for pthread_join using $CC $PTHREAD_CFLAGS $PTHREAD_LIBS])
-+        AC_LINK_IFELSE([AC_LANG_CALL([], [pthread_join])], [ax_pthread_ok=yes])
-+        AC_MSG_RESULT([$ax_pthread_ok])
-+        if test "x$ax_pthread_ok" = "xno"; then
-+                PTHREAD_LIBS=""
-+                PTHREAD_CFLAGS=""
-+        fi
-+        CC="$ax_pthread_save_CC"
-+        CFLAGS="$ax_pthread_save_CFLAGS"
-+        LIBS="$ax_pthread_save_LIBS"
-+fi
-+
-+# We must check for the threads library under a number of different
-+# names; the ordering is very important because some systems
-+# (e.g. DEC) have both -lpthread and -lpthreads, where one of the
-+# libraries is broken (non-POSIX).
-+
-+# Create a list of thread flags to try. Items with a "," contain both
-+# C compiler flags (before ",") and linker flags (after ","). Other items
-+# starting with a "-" are C compiler flags, and remaining items are
-+# library names, except for "none" which indicates that we try without
-+# any flags at all, and "pthread-config" which is a program returning
-+# the flags for the Pth emulation library.
-+
-+ax_pthread_flags="pthreads none -Kthread -pthread -pthreads -mthreads pthread --thread-safe -mt pthread-config"
-+
-+# The ordering *is* (sometimes) important.  Some notes on the
-+# individual items follow:
-+
-+# pthreads: AIX (must check this before -lpthread)
-+# none: in case threads are in libc; should be tried before -Kthread and
-+#       other compiler flags to prevent continual compiler warnings
-+# -Kthread: Sequent (threads in libc, but -Kthread needed for pthread.h)
-+# -pthread: Linux/gcc (kernel threads), BSD/gcc (userland threads), Tru64
-+#           (Note: HP C rejects this with "bad form for `-t' option")
-+# -pthreads: Solaris/gcc (Note: HP C also rejects)
-+# -mt: Sun Workshop C (may only link SunOS threads [-lthread], but it
-+#      doesn't hurt to check since this sometimes defines pthreads and
-+#      -D_REENTRANT too), HP C (must be checked before -lpthread, which
-+#      is present but should not be used directly; and before -mthreads,
-+#      because the compiler interprets this as "-mt" + "-hreads")
-+# -mthreads: Mingw32/gcc, Lynx/gcc
-+# pthread: Linux, etcetera
-+# --thread-safe: KAI C++
-+# pthread-config: use pthread-config program (for GNU Pth library)
-+
-+case $host_os in
-+
-+        freebsd*)
-+
-+        # -kthread: FreeBSD kernel threads (preferred to -pthread since SMP-able)
-+        # lthread: LinuxThreads port on FreeBSD (also preferred to -pthread)
-+
-+        ax_pthread_flags="-kthread lthread $ax_pthread_flags"
-+        ;;
-+
-+        hpux*)
-+
-+        # From the cc(1) man page: "[-mt] Sets various -D flags to enable
-+        # multi-threading and also sets -lpthread."
-+
-+        ax_pthread_flags="-mt -pthread pthread $ax_pthread_flags"
-+        ;;
-+
-+        openedition*)
-+
-+        # IBM z/OS requires a feature-test macro to be defined in order to
-+        # enable POSIX threads at all, so give the user a hint if this is
-+        # not set. (We don't define these ourselves, as they can affect
-+        # other portions of the system API in unpredictable ways.)
-+
-+        AC_EGREP_CPP([AX_PTHREAD_ZOS_MISSING],
-+            [
-+#            if !defined(_OPEN_THREADS) && !defined(_UNIX03_THREADS)
-+             AX_PTHREAD_ZOS_MISSING
-+#            endif
-+            ],
-+            [AC_MSG_WARN([IBM z/OS requires -D_OPEN_THREADS or -D_UNIX03_THREADS to enable pthreads support.])])
-+        ;;
-+
-+        solaris*)
-+
-+        # On Solaris (at least, for some versions), libc contains stubbed
-+        # (non-functional) versions of the pthreads routines, so link-based
-+        # tests will erroneously succeed. (N.B.: The stubs are missing
-+        # pthread_cleanup_push, or rather a function called by this macro,
-+        # so we could check for that, but who knows whether they'll stub
-+        # that too in a future libc.)  So we'll check first for the
-+        # standard Solaris way of linking pthreads (-mt -lpthread).
-+
-+        ax_pthread_flags="-mt,-lpthread pthread $ax_pthread_flags"
-+        ;;
-+esac
-+
-+# Are we compiling with Clang?
-+
-+AC_CACHE_CHECK([whether $CC is Clang],
-+    [ax_cv_PTHREAD_CLANG],
-+    [ax_cv_PTHREAD_CLANG=no
-+     # Note that Autoconf sets GCC=yes for Clang as well as GCC
-+     if test "x$GCC" = "xyes"; then
-+        AC_EGREP_CPP([AX_PTHREAD_CC_IS_CLANG],
-+            [/* Note: Clang 2.7 lacks __clang_[a-z]+__ */
-+#            if defined(__clang__) && defined(__llvm__)
-+             AX_PTHREAD_CC_IS_CLANG
-+#            endif
-+            ],
-+            [ax_cv_PTHREAD_CLANG=yes])
-+     fi
-+    ])
-+ax_pthread_clang="$ax_cv_PTHREAD_CLANG"
-+
-+
-+# GCC generally uses -pthread, or -pthreads on some platforms (e.g. SPARC)
-+
-+# Note that for GCC and Clang -pthread generally implies -lpthread,
-+# except when -nostdlib is passed.
-+# This is problematic using libtool to build C++ shared libraries with pthread:
-+# [1] https://gcc.gnu.org/bugzilla/show_bug.cgi?id=25460
-+# [2] https://bugzilla.redhat.com/show_bug.cgi?id=661333
-+# [3] https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=468555
-+# To solve this, first try -pthread together with -lpthread for GCC
-+
-+AS_IF([test "x$GCC" = "xyes"],
-+      [ax_pthread_flags="-pthread,-lpthread -pthread -pthreads $ax_pthread_flags"])
-+
-+# Clang takes -pthread (never supported any other flag), but we'll try with -lpthread first
-+
-+AS_IF([test "x$ax_pthread_clang" = "xyes"],
-+      [ax_pthread_flags="-pthread,-lpthread -pthread"])
-+
-+
-+# The presence of a feature test macro requesting re-entrant function
-+# definitions is, on some systems, a strong hint that pthreads support is
-+# correctly enabled
-+
-+case $host_os in
-+        darwin* | hpux* | linux* | osf* | solaris*)
-+        ax_pthread_check_macro="_REENTRANT"
-+        ;;
-+
-+        aix*)
-+        ax_pthread_check_macro="_THREAD_SAFE"
-+        ;;
-+
-+        *)
-+        ax_pthread_check_macro="--"
-+        ;;
-+esac
-+AS_IF([test "x$ax_pthread_check_macro" = "x--"],
-+      [ax_pthread_check_cond=0],
-+      [ax_pthread_check_cond="!defined($ax_pthread_check_macro)"])
-+
-+
-+if test "x$ax_pthread_ok" = "xno"; then
-+for ax_pthread_try_flag in $ax_pthread_flags; do
-+
-+        case $ax_pthread_try_flag in
-+                none)
-+                AC_MSG_CHECKING([whether pthreads work without any flags])
-+                ;;
-+
-+                *,*)
-+                PTHREAD_CFLAGS=`echo $ax_pthread_try_flag | sed "s/^\(.*\),\(.*\)$/\1/"`
-+                PTHREAD_LIBS=`echo $ax_pthread_try_flag | sed "s/^\(.*\),\(.*\)$/\2/"`
-+                AC_MSG_CHECKING([whether pthreads work with "$PTHREAD_CFLAGS" and "$PTHREAD_LIBS"])
-+                ;;
-+
-+                -*)
-+                AC_MSG_CHECKING([whether pthreads work with $ax_pthread_try_flag])
-+                PTHREAD_CFLAGS="$ax_pthread_try_flag"
-+                ;;
-+
-+                pthread-config)
-+                AC_CHECK_PROG([ax_pthread_config], [pthread-config], [yes], [no])
-+                AS_IF([test "x$ax_pthread_config" = "xno"], [continue])
-+                PTHREAD_CFLAGS="`pthread-config --cflags`"
-+                PTHREAD_LIBS="`pthread-config --ldflags` `pthread-config --libs`"
-+                ;;
-+
-+                *)
-+                AC_MSG_CHECKING([for the pthreads library -l$ax_pthread_try_flag])
-+                PTHREAD_LIBS="-l$ax_pthread_try_flag"
-+                ;;
-+        esac
-+
-+        ax_pthread_save_CFLAGS="$CFLAGS"
-+        ax_pthread_save_LIBS="$LIBS"
-+        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-+        LIBS="$PTHREAD_LIBS $LIBS"
-+
-+        # Check for various functions.  We must include pthread.h,
-+        # since some functions may be macros.  (On the Sequent, we
-+        # need a special flag -Kthread to make this header compile.)
-+        # We check for pthread_join because it is in -lpthread on IRIX
-+        # while pthread_create is in libc.  We check for pthread_attr_init
-+        # due to DEC craziness with -lpthreads.  We check for
-+        # pthread_cleanup_push because it is one of the few pthread
-+        # functions on Solaris that doesn't have a non-functional libc stub.
-+        # We try pthread_create on general principles.
-+
-+        AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <pthread.h>
-+#                       if $ax_pthread_check_cond
-+#                        error "$ax_pthread_check_macro must be defined"
-+#                       endif
-+                        static void *some_global = NULL;
-+                        static void routine(void *a)
-+                          {
-+                             /* To avoid any unused-parameter or
-+                                unused-but-set-parameter warning.  */
-+                             some_global = a;
-+                          }
-+                        static void *start_routine(void *a) { return a; }],
-+                       [pthread_t th; pthread_attr_t attr;
-+                        pthread_create(&th, 0, start_routine, 0);
-+                        pthread_join(th, 0);
-+                        pthread_attr_init(&attr);
-+                        pthread_cleanup_push(routine, 0);
-+                        pthread_cleanup_pop(0) /* ; */])],
-+            [ax_pthread_ok=yes],
-+            [])
-+
-+        CFLAGS="$ax_pthread_save_CFLAGS"
-+        LIBS="$ax_pthread_save_LIBS"
-+
-+        AC_MSG_RESULT([$ax_pthread_ok])
-+        AS_IF([test "x$ax_pthread_ok" = "xyes"], [break])
-+
-+        PTHREAD_LIBS=""
-+        PTHREAD_CFLAGS=""
-+done
-+fi
-+
-+
-+# Clang needs special handling, because older versions handle the -pthread
-+# option in a rather... idiosyncratic way
-+
-+if test "x$ax_pthread_clang" = "xyes"; then
-+
-+        # Clang takes -pthread; it has never supported any other flag
-+
-+        # (Note 1: This will need to be revisited if a system that Clang
-+        # supports has POSIX threads in a separate library.  This tends not
-+        # to be the way of modern systems, but it's conceivable.)
-+
-+        # (Note 2: On some systems, notably Darwin, -pthread is not needed
-+        # to get POSIX threads support; the API is always present and
-+        # active.  We could reasonably leave PTHREAD_CFLAGS empty.  But
-+        # -pthread does define _REENTRANT, and while the Darwin headers
-+        # ignore this macro, third-party headers might not.)
-+
-+        # However, older versions of Clang make a point of warning the user
-+        # that, in an invocation where only linking and no compilation is
-+        # taking place, the -pthread option has no effect ("argument unused
-+        # during compilation").  They expect -pthread to be passed in only
-+        # when source code is being compiled.
-+        #
-+        # Problem is, this is at odds with the way Automake and most other
-+        # C build frameworks function, which is that the same flags used in
-+        # compilation (CFLAGS) are also used in linking.  Many systems
-+        # supported by AX_PTHREAD require exactly this for POSIX threads
-+        # support, and in fact it is often not straightforward to specify a
-+        # flag that is used only in the compilation phase and not in
-+        # linking.  Such a scenario is extremely rare in practice.
-+        #
-+        # Even though use of the -pthread flag in linking would only print
-+        # a warning, this can be a nuisance for well-run software projects
-+        # that build with -Werror.  So if the active version of Clang has
-+        # this misfeature, we search for an option to squash it.
-+
-+        AC_CACHE_CHECK([whether Clang needs flag to prevent "argument unused" warning when linking with -pthread],
-+            [ax_cv_PTHREAD_CLANG_NO_WARN_FLAG],
-+            [ax_cv_PTHREAD_CLANG_NO_WARN_FLAG=unknown
-+             # Create an alternate version of $ac_link that compiles and
-+             # links in two steps (.c -> .o, .o -> exe) instead of one
-+             # (.c -> exe), because the warning occurs only in the second
-+             # step
-+             ax_pthread_save_ac_link="$ac_link"
-+             ax_pthread_sed='s/conftest\.\$ac_ext/conftest.$ac_objext/g'
-+             ax_pthread_link_step=`AS_ECHO(["$ac_link"]) | sed "$ax_pthread_sed"`
-+             ax_pthread_2step_ac_link="($ac_compile) && (echo ==== >&5) && ($ax_pthread_link_step)"
-+             ax_pthread_save_CFLAGS="$CFLAGS"
-+             for ax_pthread_try in '' -Qunused-arguments -Wno-unused-command-line-argument unknown; do
-+                AS_IF([test "x$ax_pthread_try" = "xunknown"], [break])
-+                CFLAGS="-Werror -Wunknown-warning-option $ax_pthread_try -pthread $ax_pthread_save_CFLAGS"
-+                ac_link="$ax_pthread_save_ac_link"
-+                AC_LINK_IFELSE([AC_LANG_SOURCE([[int main(void){return 0;}]])],
-+                    [ac_link="$ax_pthread_2step_ac_link"
-+                     AC_LINK_IFELSE([AC_LANG_SOURCE([[int main(void){return 0;}]])],
-+                         [break])
-+                    ])
-+             done
-+             ac_link="$ax_pthread_save_ac_link"
-+             CFLAGS="$ax_pthread_save_CFLAGS"
-+             AS_IF([test "x$ax_pthread_try" = "x"], [ax_pthread_try=no])
-+             ax_cv_PTHREAD_CLANG_NO_WARN_FLAG="$ax_pthread_try"
-+            ])
-+
-+        case "$ax_cv_PTHREAD_CLANG_NO_WARN_FLAG" in
-+                no | unknown) ;;
-+                *) PTHREAD_CFLAGS="$ax_cv_PTHREAD_CLANG_NO_WARN_FLAG $PTHREAD_CFLAGS" ;;
-+        esac
-+
-+fi # $ax_pthread_clang = yes
-+
-+
-+
-+# Various other checks:
-+if test "x$ax_pthread_ok" = "xyes"; then
-+        ax_pthread_save_CFLAGS="$CFLAGS"
-+        ax_pthread_save_LIBS="$LIBS"
-+        CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-+        LIBS="$PTHREAD_LIBS $LIBS"
-+
-+        # Detect AIX lossage: JOINABLE attribute is called UNDETACHED.
-+        AC_CACHE_CHECK([for joinable pthread attribute],
-+            [ax_cv_PTHREAD_JOINABLE_ATTR],
-+            [ax_cv_PTHREAD_JOINABLE_ATTR=unknown
-+             for ax_pthread_attr in PTHREAD_CREATE_JOINABLE PTHREAD_CREATE_UNDETACHED; do
-+                 AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <pthread.h>],
-+                                                 [int attr = $ax_pthread_attr; return attr /* ; */])],
-+                                [ax_cv_PTHREAD_JOINABLE_ATTR=$ax_pthread_attr; break],
-+                                [])
-+             done
-+            ])
-+        AS_IF([test "x$ax_cv_PTHREAD_JOINABLE_ATTR" != "xunknown" && \
-+               test "x$ax_cv_PTHREAD_JOINABLE_ATTR" != "xPTHREAD_CREATE_JOINABLE" && \
-+               test "x$ax_pthread_joinable_attr_defined" != "xyes"],
-+              [AC_DEFINE_UNQUOTED([PTHREAD_CREATE_JOINABLE],
-+                                  [$ax_cv_PTHREAD_JOINABLE_ATTR],
-+                                  [Define to necessary symbol if this constant
-+                                   uses a non-standard name on your system.])
-+               ax_pthread_joinable_attr_defined=yes
-+              ])
-+
-+        AC_CACHE_CHECK([whether more special flags are required for pthreads],
-+            [ax_cv_PTHREAD_SPECIAL_FLAGS],
-+            [ax_cv_PTHREAD_SPECIAL_FLAGS=no
-+             case $host_os in
-+             solaris*)
-+             ax_cv_PTHREAD_SPECIAL_FLAGS="-D_POSIX_PTHREAD_SEMANTICS"
-+             ;;
-+             esac
-+            ])
-+        AS_IF([test "x$ax_cv_PTHREAD_SPECIAL_FLAGS" != "xno" && \
-+               test "x$ax_pthread_special_flags_added" != "xyes"],
-+              [PTHREAD_CFLAGS="$ax_cv_PTHREAD_SPECIAL_FLAGS $PTHREAD_CFLAGS"
-+               ax_pthread_special_flags_added=yes])
-+
-+        AC_CACHE_CHECK([for PTHREAD_PRIO_INHERIT],
-+            [ax_cv_PTHREAD_PRIO_INHERIT],
-+            [AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <pthread.h>]],
-+                                             [[int i = PTHREAD_PRIO_INHERIT;
-+                                               return i;]])],
-+                            [ax_cv_PTHREAD_PRIO_INHERIT=yes],
-+                            [ax_cv_PTHREAD_PRIO_INHERIT=no])
-+            ])
-+        AS_IF([test "x$ax_cv_PTHREAD_PRIO_INHERIT" = "xyes" && \
-+               test "x$ax_pthread_prio_inherit_defined" != "xyes"],
-+              [AC_DEFINE([HAVE_PTHREAD_PRIO_INHERIT], [1], [Have PTHREAD_PRIO_INHERIT.])
-+               ax_pthread_prio_inherit_defined=yes
-+              ])
-+
-+        CFLAGS="$ax_pthread_save_CFLAGS"
-+        LIBS="$ax_pthread_save_LIBS"
-+
-+        # More AIX lossage: compile with *_r variant
-+        if test "x$GCC" != "xyes"; then
-+            case $host_os in
-+                aix*)
-+                AS_CASE(["x/$CC"],
-+                    [x*/c89|x*/c89_128|x*/c99|x*/c99_128|x*/cc|x*/cc128|x*/xlc|x*/xlc_v6|x*/xlc128|x*/xlc128_v6],
-+                    [#handle absolute path differently from PATH based program lookup
-+                     AS_CASE(["x$CC"],
-+                         [x/*],
-+                         [
-+			   AS_IF([AS_EXECUTABLE_P([${CC}_r])],[PTHREAD_CC="${CC}_r"])
-+			   AS_IF([test "x${CXX}" != "x"], [AS_IF([AS_EXECUTABLE_P([${CXX}_r])],[PTHREAD_CXX="${CXX}_r"])])
-+			 ],
-+                         [
-+			   AC_CHECK_PROGS([PTHREAD_CC],[${CC}_r],[$CC])
-+			   AS_IF([test "x${CXX}" != "x"], [AC_CHECK_PROGS([PTHREAD_CXX],[${CXX}_r],[$CXX])])
-+			 ]
-+                     )
-+                    ])
-+                ;;
-+            esac
-+        fi
-+fi
-+
-+test -n "$PTHREAD_CC" || PTHREAD_CC="$CC"
-+test -n "$PTHREAD_CXX" || PTHREAD_CXX="$CXX"
-+
-+AC_SUBST([PTHREAD_LIBS])
-+AC_SUBST([PTHREAD_CFLAGS])
-+AC_SUBST([PTHREAD_CC])
-+AC_SUBST([PTHREAD_CXX])
-+
-+# Finally, execute ACTION-IF-FOUND/ACTION-IF-NOT-FOUND:
-+if test "x$ax_pthread_ok" = "xyes"; then
-+        ifelse([$1],,[AC_DEFINE([HAVE_PTHREAD],[1],[Define if you have POSIX threads libraries and header files.])],[$1])
-+        :
-+else
-+        ax_pthread_ok=no
-+        $2
-+fi
-+AC_LANG_POP
-+])dnl AX_PTHREAD
 diff --git a/meson.build b/meson.build
-index 56e9a59..1272889 100644
+index 56e9a593be4a5534c05fb38eb727dcf0f16572fa..1272889c9ec62fd91ccddf94f37147893337020c 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -4,7 +4,7 @@ project(
@@ -3175,7 +2665,7 @@ index 56e9a59..1272889 100644
  summary('ASM optimizations', enable_asm, bool_yn: true)
 +summary('Threading', enable_threads, bool_yn: true)
 diff --git a/meson_options.txt b/meson_options.txt
-index ff560da..678e183 100644
+index ff560dad9573a0936b7ffc98f3ac94c285104c36..678e18348407ea0b9800e5be35035bcef0e2969b 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
 @@ -7,6 +7,8 @@ option('art-samples', type: 'string', description: 'Path to the root of regressi

@@ -1,9 +1,9 @@
 diff --git a/libass/ass_render.c b/libass/ass_render.c
-index 457e92c..728a6ab 100644
+index d60ab4f5b78cb74a3f1999fd3edfe106b80c75e6..a43e735d57e8d73c17733c7386238ef01b752838 100644
 --- a/libass/ass_render.c
 +++ b/libass/ass_render.c
-@@ -2724,6 +2724,35 @@ static double restore_blur(int qblur)
-     return sigma * sigma;
+@@ -2780,6 +2780,26 @@ static void init_filter_desc(RenderContext *state, const GlyphInfo *info,
+         filter->shadow.x = filter->shadow.y = 0;
  }
  
 +static inline int subpixel_abs_ceil(int32_t x)
@@ -13,20 +13,11 @@ index 457e92c..728a6ab 100644
 +}
 +
 +static bool bitmap_may_hit_frame(const Bitmap *bm, ASS_Vector pos,
-+                                 const FilterDesc *filter,
++                                 int64_t xpad, int64_t ypad,
 +                                 int frame_w, int frame_h)
 +{
 +    if (!bm || !bm->buffer || frame_w <= 0 || frame_h <= 0)
 +        return false;
-+
-+    int64_t xpad = ass_blur_padding(restore_blur(filter->blur_x)) +
-+        ass_be_padding(filter->be);
-+    int64_t ypad = ass_blur_padding(restore_blur(filter->blur_y)) +
-+        ass_be_padding(filter->be);
-+    if (filter->flags & FILTER_NONZERO_SHADOW) {
-+        xpad += subpixel_abs_ceil(filter->shadow.x);
-+        ypad += subpixel_abs_ceil(filter->shadow.y);
-+    }
 +
 +    int64_t left = pos.x + bm->left - xpad;
 +    int64_t top = pos.y + bm->top - ypad;
@@ -38,14 +29,37 @@ index 457e92c..728a6ab 100644
  // Convert glyphs to bitmaps, combine them, apply blur, generate shadows.
  static void render_and_combine_glyphs(RenderContext *state,
                                        double device_x, double device_y)
-@@ -2856,6 +2885,15 @@ static void render_and_combine_glyphs(RenderContext *state,
+@@ -2792,6 +2812,7 @@ static void render_and_combine_glyphs(RenderContext *state,
+     bool new_run = true;
+     CombinedBitmapInfo *combined_info = text_info->combined_bitmaps;
+     CombinedBitmapInfo *current_info = NULL;
++    int64_t frame_pad_x = 0, frame_pad_y = 0;
+     ASS_DVector offset;
+     for (int i = 0; i < text_info->length; i++) {
+         GlyphInfo *info = text_info->glyphs + i;
+@@ -2843,6 +2864,14 @@ static void render_and_combine_glyphs(RenderContext *state,
+                 current_info->leftmost_x = OUTLINE_MAX;
+ 
+                 init_filter_desc(state, info, flags, &current_info->filter);
++                uint32_t xpad, ypad;
++                get_filter_padding(&current_info->filter, &xpad, &ypad);
++                frame_pad_x = xpad;
++                frame_pad_y = ypad;
++                if (flags & FILTER_NONZERO_SHADOW) {
++                    frame_pad_x += subpixel_abs_ceil(current_info->filter.shadow.x);
++                    frame_pad_y += subpixel_abs_ceil(current_info->filter.shadow.y);
++                }
+ 
+                 current_info->x = current_info->y = INT_MAX;
+                 current_info->bm = current_info->bm_o = current_info->bm_s = NULL;
+@@ -2870,6 +2899,15 @@ static void render_and_combine_glyphs(RenderContext *state,
              if (!info->bm && !info->bm_o)
                  continue;
  
-+            if (!bitmap_may_hit_frame(info->bm, pos, &current_info->filter,
++            if (!bitmap_may_hit_frame(info->bm, pos, frame_pad_x, frame_pad_y,
 +                                      render_priv->width, render_priv->height))
 +                info->bm = NULL;
-+            if (!bitmap_may_hit_frame(info->bm_o, pos_o, &current_info->filter,
++            if (!bitmap_may_hit_frame(info->bm_o, pos_o, frame_pad_x, frame_pad_y,
 +                                      render_priv->width, render_priv->height))
 +                info->bm_o = NULL;
 +            if (!info->bm && !info->bm_o)
