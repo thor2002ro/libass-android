@@ -64,10 +64,10 @@ index 49f906b3fede3bfc34c76ec4c4e570e871d790fb..65fb59b5186c25806d0e78b93fa31190
          if (!(mask & ASS_FLAG_WIDE_STRIPE)) {
 diff --git a/libass/c/c_blend_bitmaps_neon.c b/libass/c/c_blend_bitmaps_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e7407379659178f7e07c6b912dad02e2df715b8
+index 0000000000000000000000000000000000000000..84314c5164009a72cf0aeac6bd54a3a28ca0f8f9
 --- /dev/null
 +++ b/libass/c/c_blend_bitmaps_neon.c
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,53 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -92,17 +92,21 @@ index 0000000000000000000000000000000000000000..5e7407379659178f7e07c6b912dad02e
 +    ASSUME(!(src_stride % ALIGNMENT));
 +    ASSUME(width > 0 && height > 0);
 +
++    // A separate vector boundary lets the compiler prove that the scalar
++    // tail is shorter than one block and prevents redundant vectorization.
++    const size_t tail_width = width & (BLOCK_SIZE - 1);
++    const size_t full_width = width - tail_width;
 +    for (size_t y = 0; y < height; y++) {
 +        size_t x = 0;
 +
 +        // Saturating byte addition maps the bitmap blend directly to one
 +        // NEON instruction without the C path's widening and narrowing.
-+        for (; x + BLOCK_SIZE <= width; x += BLOCK_SIZE) {
++        for (; x < full_width; x += BLOCK_SIZE) {
 +            uint8x16_t value = vqaddq_u8(vld1q_u8(dst + x),
 +                                         vld1q_u8(src + x));
 +            vst1q_u8(dst + x, value);
 +        }
-+        for (; x < width; x++) {
++        for (size_t i = 0; i < tail_width; i++, x++) {
 +            unsigned value = dst[x] + src[x];
 +            dst[x] = value > 255 ? 255 : value;
 +        }
@@ -129,4 +133,3 @@ index d0094a598f179d9b29d297e3ec2006e3cdf2ff51..37eb0a4238d1ed21ff5448fc57092398
      'c/c_blur.c',
      'c/c_blur_neon.c',
      'c/c_rasterizer.c',
-
