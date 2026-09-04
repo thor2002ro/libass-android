@@ -1,0 +1,72 @@
+diff --git a/checkasm/rasterizer.c b/checkasm/rasterizer.c
+index caa0a3101bb1ace3617d4fb071b29e8fdf136b61..bbba4d6d4da88618f3b49202ad8d98ad47b7ce0e 100644
+--- a/checkasm/rasterizer.c
++++ b/checkasm/rasterizer.c
+@@ -196,6 +196,7 @@ static void check_merge_tile(MergeTileFunc func, const char *name, int tile_size
+ }
+ 
+ #if defined(__arm__) && defined(__ARM_NEON)
++static void solid_dispatch_marker(void) {}
+ static void generic_dispatch_marker(void) {}
+ #endif
+ 
+@@ -208,8 +209,14 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+     };
+ #if defined(__arm__) && defined(__ARM_NEON)
+     if (cpu_flag & ASS_CPU_FLAG_ARM_NEON) {
++        FillSolidTileFunc ass_fill_solid_tile16_c;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_c;
++        if (checkasm_check_func(solid_dispatch_marker,
++                               "fill_solid_dispatch_tile16") &&
++            engine[0].fill_solid == ass_fill_solid_tile16_c)
++            fail();
++        report("fill_solid_dispatch_tile16");
+         if (checkasm_check_func(ass_fill_halfplane_tile16_neon,
+                                "fill_halfplane_dispatch_tile16") &&
+             engine[0].fill_halfplane != ass_fill_halfplane_tile16_neon)
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 6befc1f4212fe52cf2e585e7fdfee0ff495cd657..19d0063f4fa1ba1efa1bb031348bd16b320b6b19 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -205,6 +205,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+     }
+ #if defined(__arm__) && defined(__ARM_NEON)
+     if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
++        FillSolidTileFunc ass_fill_solid_tile16_neon;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_neon;
+         BitmapBlendFunc ass_add_bitmaps_neon;
+@@ -217,6 +218,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         ParamFilterFunc PARAM_BLUR_SET(horz16_neon);
+         ParamFilterFunc PARAM_BLUR_SET(vert16_neon);
+         if (!(mask & ASS_FLAG_LARGE_TILES)) {
++            engine.fill_solid = ass_fill_solid_tile16_neon;
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+             engine.fill_generic = ass_fill_generic_tile16_neon;
+         }
+diff --git a/libass/c/c_rasterizer_neon.c b/libass/c/c_rasterizer_neon.c
+index 750ed21ad8246c27099cc96cc1f155738ea6c74e..11f98e7bf6cc1ceb29dbf09f85c35d8bd75d8953 100644
+--- a/libass/c/c_rasterizer_neon.c
++++ b/libass/c/c_rasterizer_neon.c
+@@ -21,6 +21,20 @@
+     (((int32_t) ((c) >> (7 + TILE_ORDER)) * (int64_t) (scale) + ((int64_t) 1 << 44)) >> 45)
+ 
+ 
++void ass_fill_solid_tile16_neon(uint8_t *buf, ptrdiff_t stride, int set)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++
++    uint8x16_t value = vdupq_n_u8(set ? 255 : 0);
++    for (int y = 0; y < TILE_SIZE; y++) {
++        // A 16-pixel tile row is exactly one NEON vector. Advancing by
++        // stride leaves any padding after the row unchanged.
++        vst1q_u8(buf, value);
++        buf += stride;
++    }
++}
++
++
+ static inline uint8x8_t fill_halfplane_line_neon(int16x8_t x,
+                                                   int16_t aa,
+                                                   int16_t cc,
