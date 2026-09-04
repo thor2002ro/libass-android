@@ -1,5 +1,5 @@
 diff --git a/checkasm/blur.c b/checkasm/blur.c
-index fe080c6e4c31c90b2533d18527be550baf2fb484..5ce53d513b122c89e674c1741bda916041d689dd 100644
+index fe080c6e4c31c90b2533d18527be550baf2fb484..28f2998379018689f165849e2409d2b5d0c3d40f 100644
 --- a/checkasm/blur.c
 +++ b/checkasm/blur.c
 @@ -38,6 +38,24 @@ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
@@ -37,6 +37,63 @@ index fe080c6e4c31c90b2533d18527be550baf2fb484..5ce53d513b122c89e674c1741bda9160
          fail();
      report("armv7_neon_gaussian_dispatch");
  }
+@@ -163,11 +182,14 @@ static void check_fixed_filter(FilterFunc func, const char *name, int align)
+ 
+ static void check_param_filter(ParamFilterFunc func, const char *name, int n, int align)
+ {
+-    enum { PADDING = FFMAX(32 * HEIGHT, 16 * STRIDE) };
++    enum {
++        PARAM_HEIGHT = 32,
++        PADDING = FFMAX(32 * PARAM_HEIGHT, 16 * STRIDE),
++    };
+ 
+-    ALIGN(int16_t src[STRIDE * HEIGHT], 32);
+-    ALIGN(int16_t dst_ref[STRIDE * HEIGHT + PADDING], 32);
+-    ALIGN(int16_t dst_new[STRIDE * HEIGHT + PADDING], 32);
++    ALIGN(int16_t src[STRIDE * PARAM_HEIGHT], 32);
++    ALIGN(int16_t dst_ref[STRIDE * PARAM_HEIGHT + PADDING], 32);
++    ALIGN(int16_t dst_new[STRIDE * PARAM_HEIGHT + PADDING], 32);
+     int16_t param[8];
+     declare_func(void,
+                  int16_t *dst, const int16_t *src,
+@@ -179,26 +201,27 @@ static void check_param_filter(ParamFilterFunc func, const char *name, int n, in
+             for (int i = 0; i < sizeof(src) / 2; i++)
+                 src[i] = rnd() % 0x4001;
+ 
+-            for (int i = 0; i < sizeof(dst_ref) / 2; i++)
+-                dst_ref[i] = dst_new[i] = rnd();
+-
+             int left = 0x8000;
+             for (int i = 0; i < n; i++) {
+                 param[i] = rnd() % FFMIN(left + 1, 0x8000);
+                 left -= param[i];
+             }
+ 
+-            int h = HEIGHT - (rnd() & 3);
+-            call_ref(dst_ref, src, w, h, param);
+-            call_new(dst_new, src, w, h, param);
++            for (int h = 1; h <= PARAM_HEIGHT; h++) {
++                for (int i = 0; i < sizeof(dst_ref) / 2; i++)
++                    dst_ref[i] = dst_new[i] = rnd();
+ 
+-            if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
+-                fail();
+-                break;
++                call_ref(dst_ref, src, w, h, param);
++                call_new(dst_new, src, w, h, param);
++
++                if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
++                    fail();
++                    break;
++                }
+             }
+         }
+ 
+-        bench_new(dst_new, src, STRIDE, HEIGHT, param);
++        bench_new(dst_new, src, STRIDE, PARAM_HEIGHT, param);
+     }
+ 
+     report(name, n, align);
 diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
 index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff495cd657 100644
 --- a/libass/ass_bitmap_engine.c
@@ -60,10 +117,10 @@ index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff
      }
  #endif
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
-index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53bfacd82e 100644
+index eea8a90b765e262d1c5c688f9e858b97ca77e9da..6eaa0054bedf6452e5eede8b6dcc775ff0a19423 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -353,9 +353,142 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+@@ -353,9 +353,177 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
      }
  }
  
@@ -135,10 +192,48 @@ index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53
 +    }
 +}
 +
-+static void blur_vert16_neon(int16_t *restrict dst,
-+                             const int16_t *restrict src,
-+                             size_t src_width, size_t src_height,
-+                             const int16_t *restrict param, int n)
++static inline int16x8_t blur_vert_edge_line_neon(
++    const int16_t *src, ptrdiff_t center_offs, size_t step,
++    const int16_t *param, int n)
++{
++    int16x8_t center = vld1q_s16(get_line(src, center_offs, step));
++    int32x4_t lo = vdupq_n_s32(0x8000);
++    int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++#pragma clang loop unroll(full)
++#endif
++    for (int i = n; i > 0; i--)
++        accumulate_param_pair(
++            &lo, &hi, center,
++            vld1q_s16(get_line(
++                src, center_offs - i * STRIPE_WIDTH, step)),
++            vld1q_s16(get_line(
++                src, center_offs + i * STRIPE_WIDTH, step)),
++            param[i - 1]);
++    return finish_param_blur(center, lo, hi);
++}
++
++static inline int16x8_t blur_vert_inner_line_neon(
++    const int16_t *center_ptr, const int16_t *param, int n)
++{
++    int16x8_t center = vld1q_s16(center_ptr);
++    int32x4_t lo = vdupq_n_s32(0x8000);
++    int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++#pragma clang loop unroll(full)
++#endif
++    for (int i = n; i > 0; i--)
++        accumulate_param_pair(
++            &lo, &hi, center,
++            vld1q_s16(center_ptr - i * STRIPE_WIDTH),
++            vld1q_s16(center_ptr + i * STRIPE_WIDTH), param[i - 1]);
++    return finish_param_blur(center, lo, hi);
++}
++
++static inline __attribute__((always_inline)) void blur_vert16_neon(
++    int16_t *restrict dst, const int16_t *restrict src,
++    size_t src_width, size_t src_height,
++    const int16_t *restrict param, int n)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
@@ -148,30 +243,27 @@ index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53
 +    size_t step = STRIPE_WIDTH * src_height;
 +
 +    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
-+        ptrdiff_t offs = 0;
-+        for (size_t y = 0; y < dst_height; y++) {
-+            ptrdiff_t center_offs = offs - n * STRIPE_WIDTH;
-+            int16x8_t center = vld1q_s16(
-+                get_line(src, center_offs, step));
-+            int32x4_t lo = vdupq_n_s32(0x8000);
-+            int32x4_t hi = vdupq_n_s32(0x8000);
-+#if defined(__clang__)
-+            // The radius-specific wrappers make this loop finite at compile
-+            // time and allow coefficient loads to be scheduled with the taps.
-+#pragma clang loop unroll(full)
-+#endif
-+            for (int i = n; i > 0; i--)
-+                accumulate_param_pair(
-+                    &lo, &hi, center,
-+                    vld1q_s16(get_line(
-+                        src, center_offs - i * STRIPE_WIDTH, step)),
-+                    vld1q_s16(get_line(
-+                        src, center_offs + i * STRIPE_WIDTH, step)),
-+                    param[i - 1]);
-+
-+            vst1q_s16(dst, finish_param_blur(center, lo, hi));
++        size_t y = 0;
++        for (; y < 2 * (size_t) n; y++) {
++            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
++            vst1q_s16(dst, blur_vert_edge_line_neon(
++                src, center_offs, step, param, n));
 +            dst += STRIPE_WIDTH;
-+            offs += STRIPE_WIDTH;
++        }
++
++        // From row 2n through the final source row, every kernel tap is
++        // inside this stripe and can bypass transparent-edge selection.
++        for (; y < src_height; y++) {
++            const int16_t *center = src + (y - n) * STRIPE_WIDTH;
++            vst1q_s16(dst, blur_vert_inner_line_neon(center, param, n));
++            dst += STRIPE_WIDTH;
++        }
++
++        for (; y < dst_height; y++) {
++            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
++            vst1q_s16(dst, blur_vert_edge_line_neon(
++                src, center_offs, step, param, n));
++            dst += STRIPE_WIDTH;
 +        }
 +        src += step;
 +    }
