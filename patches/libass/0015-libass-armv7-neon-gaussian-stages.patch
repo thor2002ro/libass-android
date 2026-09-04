@@ -1,0 +1,379 @@
+diff --git a/checkasm/blur.c b/checkasm/blur.c
+index bd5a9f37df9e85df26660ee537ba883da1e185b5..10f59abb7b202ac5a2d935572ecd9a30020f5001 100644
+--- a/checkasm/blur.c
++++ b/checkasm/blur.c
+@@ -27,6 +27,31 @@
+ #define STRIDE 64
+ #define MIN_WIDTH 1
+ 
++#if defined(__arm__) && defined(__ARM_NEON)
++static void dispatch_c_marker(void) {}
++static void dispatch_neon_marker(void) {}
++
++static void check_armv7_neon_dispatch(const BitmapEngine *engine,
++                                      unsigned cpu_flag)
++{
++    Convert16to8Func ass_stripe_pack16_c;
++    FilterFunc ass_shrink_horz16_c, ass_shrink_vert16_c;
++    FilterFunc ass_expand_horz16_c, ass_expand_vert16_c;
++    void *marker = cpu_flag & ASS_CPU_FLAG_ARM_NEON ?
++        dispatch_neon_marker : dispatch_c_marker;
++
++    if (checkasm_check_func(marker, "armv7_neon_gaussian_dispatch") &&
++        cpu_flag & ASS_CPU_FLAG_ARM_NEON &&
++        (engine->stripe_pack == ass_stripe_pack16_c ||
++         engine->shrink_horz == ass_shrink_horz16_c ||
++         engine->shrink_vert == ass_shrink_vert16_c ||
++         engine->expand_horz == ass_expand_horz16_c ||
++         engine->expand_vert == ass_expand_vert16_c))
++        fail();
++    report("armv7_neon_gaussian_dispatch");
++}
++#endif
++
+ static void check_stripe_unpack(Convert8to16Func func, const char *name, int align)
+ {
+     ALIGN(uint8_t src[STRIDE * HEIGHT], 32);
+@@ -181,6 +206,9 @@ void checkasm_check_blur(unsigned cpu_flag)
+         ass_bitmap_engine_init(cpu_flag),
+         ass_bitmap_engine_init(cpu_flag | ASS_FLAG_WIDE_STRIPE)
+     };
++#if defined(__arm__) && defined(__ARM_NEON)
++    check_armv7_neon_dispatch(&engine[0], cpu_flag);
++#endif
+     for (int i = 0; i < 2; i++) {
+         int align = 1 << engine[i].align_order;
+         check_stripe_unpack(engine[i].stripe_unpack, "stripe_unpack%d", align);
+diff --git a/checkasm/shift.c b/checkasm/shift.c
+index 7a7409f3b3b0a35255539b9f3e03a0073ca8ce5f..e7ee3a72941cbda0b3adac28eb8baca7fd74a975 100644
+--- a/checkasm/shift.c
++++ b/checkasm/shift.c
+@@ -51,3 +51,4 @@ void checkasm_check_shift(unsigned cpu_flag)
+ {
+     BitmapEngine engine = ass_bitmap_engine_init(cpu_flag);
+     check_shift(engine.shift);
++}
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index 58debd40b518d4e5bed3ad2a58ee6102f641c035..246cc856c09262938778489018cefb8de6af1817 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -29,6 +29,7 @@ libass_libass_internal_la_SOURCES = \
+     libass/c/rasterizer_template.h libass/c/c_rasterizer.c \
+     libass/c/c_rasterizer_neon.c \
+     libass/c/c_blend_bitmaps.c \
++    libass/c/c_blur_neon.c \
+     libass/c/c_shift.c \
+     libass/c/c_be_blur.c \
+     libass/c/blur_template.h libass/c/c_blur.c \
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index a5520e7cce523e8eb9287df564f41dec2434369f..dab69249a99df462c83bc154148f3a595777374b 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -207,9 +207,19 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+     if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         ShiftFunc ass_shift_neon;
++        Convert16to8Func ass_stripe_pack16_neon;
++        FilterFunc ass_shrink_horz16_neon, ass_shrink_vert16_neon;
++        FilterFunc ass_expand_horz16_neon, ass_expand_vert16_neon;
+         if (!(mask & ASS_FLAG_LARGE_TILES))
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+         engine.shift = ass_shift_neon;
++        if (!(mask & ASS_FLAG_WIDE_STRIPE)) {
++            engine.stripe_pack = ass_stripe_pack16_neon;
++            engine.shrink_horz = ass_shrink_horz16_neon;
++            engine.shrink_vert = ass_shrink_vert16_neon;
++            engine.expand_horz = ass_expand_horz16_neon;
++            engine.expand_vert = ass_expand_vert16_neon;
++        }
+     }
+ #endif
+     return engine;
+diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f136556238
+--- /dev/null
++++ b/libass/c/c_blur_neon.c
+@@ -0,0 +1,270 @@
++#include "config.h"
++
++#if defined(__arm__) && defined(__ARM_NEON)
++
++#include "ass_compat.h"
++#include "ass_utils.h"
++
++#include <arm_neon.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++
++#define ALIGNMENT    16
++#define STRIPE_WIDTH 8
++#define STRIPE_MASK  (STRIPE_WIDTH - 1)
++
++
++static const int16_t zero_line[STRIPE_WIDTH];
++
++// Gaussian passes extend past the bitmap with transparent samples.
++static inline const int16_t *get_line(const int16_t *ptr,
++                                      ptrdiff_t offs, size_t size)
++{
++    return (size_t) offs < size ? ptr + offs : zero_line;
++}
++
++static inline uint32x4_t shrink4(uint16x4_t p1p, uint16x4_t p1n,
++                                 uint16x4_t z0p, uint16x4_t z0n,
++                                 uint16x4_t n1p, uint16x4_t n1n)
++{
++    // Keep the C routine's staged truncation while widening sums that can
++    // temporarily exceed 16 bits.
++    uint32x4_t value = vaddl_u16(p1p, p1n);
++    value = vaddw_u16(value, n1p);
++    value = vaddw_u16(value, n1n);
++    value = vshrq_n_u32(value, 1);
++    value = vaddw_u16(value, z0p);
++    value = vaddw_u16(value, z0n);
++    value = vshrq_n_u32(value, 1);
++    value = vaddw_u16(value, p1n);
++    value = vaddw_u16(value, n1p);
++    value = vshrq_n_u32(value, 1);
++    value = vaddw_u16(value, z0p);
++    value = vaddw_u16(value, z0n);
++    return vshrq_n_u32(vaddq_u32(value, vdupq_n_u32(2)), 2);
++}
++
++static inline uint16x8_t shrink8(int16x8_t p1p, int16x8_t p1n,
++                                 int16x8_t z0p, int16x8_t z0n,
++                                 int16x8_t n1p, int16x8_t n1n)
++{
++    uint16x8_t a = vreinterpretq_u16_s16(p1p);
++    uint16x8_t b = vreinterpretq_u16_s16(p1n);
++    uint16x8_t c = vreinterpretq_u16_s16(z0p);
++    uint16x8_t d = vreinterpretq_u16_s16(z0n);
++    uint16x8_t e = vreinterpretq_u16_s16(n1p);
++    uint16x8_t f = vreinterpretq_u16_s16(n1n);
++    uint32x4_t lo = shrink4(vget_low_u16(a), vget_low_u16(b),
++                            vget_low_u16(c), vget_low_u16(d),
++                            vget_low_u16(e), vget_low_u16(f));
++    uint32x4_t hi = shrink4(vget_high_u16(a), vget_high_u16(b),
++                            vget_high_u16(c), vget_high_u16(d),
++                            vget_high_u16(e), vget_high_u16(f));
++    return vcombine_u16(vmovn_u32(lo), vmovn_u32(hi));
++}
++
++static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
++                           uint16x8_t *rp, uint16x8_t *rn)
++{
++    uint16x8_t value = vhaddq_u16(vhaddq_u16(p1, n1), z0);
++    *rp = vrhaddq_u16(vhaddq_u16(value, p1), z0);
++    *rn = vrhaddq_u16(vhaddq_u16(value, n1), z0);
++}
++
++void ass_stripe_pack16_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
++                             const int16_t *restrict src,
++                             size_t width, size_t height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT) && !(dst_stride % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(width > 0 && height > 0);
++
++    static const uint16_t dither[2][STRIPE_WIDTH] = {
++        {  8, 40,  8, 40,  8, 40,  8, 40 },
++        { 56, 24, 56, 24, 56, 24, 56, 24 },
++    };
++
++    // The intermediate bitmap stores one vertical eight-pixel stripe at a
++    // time, so advancing src walks down a stripe rather than across a row.
++    for (size_t x = 0; x < width; x += STRIPE_WIDTH) {
++        uint8_t *ptr = dst;
++        for (size_t y = 0; y < height; y++) {
++            uint16x8_t value = vreinterpretq_u16_s16(vld1q_s16(src));
++            value = vsubq_u16(value, vshrq_n_u16(value, 8));
++            value = vaddq_u16(value, vld1q_u16(dither[y & 1]));
++            vst1_u8(ptr, vshrn_n_u16(value, 6));
++            ptr += dst_stride;
++            src += STRIPE_WIDTH;
++        }
++        dst += STRIPE_WIDTH;
++    }
++
++    size_t left = dst_stride - ((width + STRIPE_MASK) & ~STRIPE_MASK);
++    for (size_t y = 0; y < height; y++) {
++        memset(dst, 0, left);
++        dst += dst_stride;
++    }
++}
++
++void ass_shrink_horz16_neon(int16_t *restrict dst,
++                             const int16_t *restrict src,
++                             size_t src_width, size_t src_height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(src_width > 0 && src_height > 0);
++
++    size_t dst_width = (src_width + 5) >> 1;
++    size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
++    size_t step = STRIPE_WIDTH * src_height;
++    ptrdiff_t offs = 0;
++
++    for (size_t x = 0; x < dst_width; x += STRIPE_WIDTH) {
++        for (size_t y = 0; y < src_height; y++) {
++            int16x8_t prev = vld1q_s16(get_line(src, offs - step, size));
++            int16x8_t curr = vld1q_s16(get_line(src, offs, size));
++            int16x8_t next = vld1q_s16(get_line(src, offs + step, size));
++            // Each output consumes two input pixels. Deinterleave the three
++            // adjacent stripes into the six taps used by the shrink kernel.
++            int16x8_t first = vextq_s16(prev, curr, 4);
++            int16x8_t second = vextq_s16(curr, next, 4);
++            int16x8x2_t pairs = vuzpq_s16(first, second);
++            int16x4x2_t tail4 = vuzp_s16(vget_high_s16(next),
++                                         vget_high_s16(next));
++            int16x8_t even_tail = vcombine_s16(tail4.val[0], tail4.val[0]);
++            int16x8_t odd_tail = vcombine_s16(tail4.val[1], tail4.val[1]);
++
++            uint16x8_t value = shrink8(
++                pairs.val[0], pairs.val[1],
++                vextq_s16(pairs.val[0], even_tail, 1),
++                vextq_s16(pairs.val[1], odd_tail, 1),
++                vextq_s16(pairs.val[0], even_tail, 2),
++                vextq_s16(pairs.val[1], odd_tail, 2));
++            vst1q_s16(dst, vreinterpretq_s16_u16(value));
++            dst += STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++        offs += step;
++    }
++}
++
++void ass_shrink_vert16_neon(int16_t *restrict dst,
++                             const int16_t *restrict src,
++                             size_t src_width, size_t src_height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(src_width > 0 && src_height > 0);
++
++    size_t dst_height = (src_height + 5) >> 1;
++    size_t step = STRIPE_WIDTH * src_height;
++
++    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
++        ptrdiff_t offs = 0;
++        for (size_t y = 0; y < dst_height; y++) {
++            uint16x8_t value = shrink8(
++                vld1q_s16(get_line(src, offs - 4 * STRIPE_WIDTH, step)),
++                vld1q_s16(get_line(src, offs - 3 * STRIPE_WIDTH, step)),
++                vld1q_s16(get_line(src, offs - 2 * STRIPE_WIDTH, step)),
++                vld1q_s16(get_line(src, offs - 1 * STRIPE_WIDTH, step)),
++                vld1q_s16(get_line(src, offs, step)),
++                vld1q_s16(get_line(src, offs + 1 * STRIPE_WIDTH, step)));
++            vst1q_s16(dst, vreinterpretq_s16_u16(value));
++            dst += STRIPE_WIDTH;
++            offs += 2 * STRIPE_WIDTH;
++        }
++        src += step;
++    }
++}
++
++void ass_expand_horz16_neon(int16_t *restrict dst,
++                             const int16_t *restrict src,
++                             size_t src_width, size_t src_height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(src_width > 0 && src_height > 0);
++
++    size_t dst_width = 2 * src_width + 4;
++    size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
++    size_t step = STRIPE_WIDTH * src_height;
++    ptrdiff_t offs = 0;
++
++    for (size_t x = STRIPE_WIDTH; x < dst_width; x += 2 * STRIPE_WIDTH) {
++        for (size_t y = 0; y < src_height; y++) {
++            uint16x8_t prev = vreinterpretq_u16_s16(
++                vld1q_s16(get_line(src, offs - step, size)));
++            uint16x8_t curr = vreinterpretq_u16_s16(
++                vld1q_s16(get_line(src, offs, size)));
++            uint16x8_t rp, rn;
++            expand8(vextq_u16(prev, curr, 6),
++                    vextq_u16(prev, curr, 7), curr, &rp, &rn);
++            // Expansion emits two pixels per input. The first four pairs stay
++            // in this stripe; the remaining four belong to the next stripe.
++            uint16x8x2_t packed = vzipq_u16(rp, rn);
++            vst1q_s16(dst, vreinterpretq_s16_u16(packed.val[0]));
++            vst1q_s16(dst + step, vreinterpretq_s16_u16(packed.val[1]));
++            dst += STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++        dst += step;
++    }
++
++    if ((dst_width - 1) & STRIPE_WIDTH)
++        return;
++
++    for (size_t y = 0; y < src_height; y++) {
++        uint16x8_t prev = vreinterpretq_u16_s16(
++            vld1q_s16(get_line(src, offs - step, size)));
++        uint16x8_t curr = vreinterpretq_u16_s16(
++            vld1q_s16(get_line(src, offs, size)));
++        uint16x8_t rp, rn;
++        expand8(vextq_u16(prev, curr, 6),
++                vextq_u16(prev, curr, 7), curr, &rp, &rn);
++        uint16x8x2_t packed = vzipq_u16(rp, rn);
++        vst1q_s16(dst, vreinterpretq_s16_u16(packed.val[0]));
++        dst += STRIPE_WIDTH;
++        offs += STRIPE_WIDTH;
++    }
++}
++
++void ass_expand_vert16_neon(int16_t *restrict dst,
++                             const int16_t *restrict src,
++                             size_t src_width, size_t src_height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(src_width > 0 && src_height > 0);
++
++    size_t dst_height = 2 * src_height + 4;
++    size_t step = STRIPE_WIDTH * src_height;
++
++    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
++        ptrdiff_t offs = 0;
++        for (size_t y = 0; y < dst_height; y += 2) {
++            uint16x8_t rp, rn;
++            expand8(
++                vreinterpretq_u16_s16(vld1q_s16(
++                    get_line(src, offs - 2 * STRIPE_WIDTH, step))),
++                vreinterpretq_u16_s16(vld1q_s16(
++                    get_line(src, offs - 1 * STRIPE_WIDTH, step))),
++                vreinterpretq_u16_s16(vld1q_s16(
++                    get_line(src, offs, step))),
++                &rp, &rn);
++            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
++            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
++            dst += 2 * STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++        src += step;
++    }
++}
++
++
++#undef ALIGNMENT
++#undef STRIPE_WIDTH
++#undef STRIPE_MASK
++
++#endif
+diff --git a/libass/meson.build b/libass/meson.build
+index 8c18ac4334c50d919fec7a66c34005597ca9c149..fa8de44d0418401ccb2ecca03c3bdf175e7cf4ba 100644
+--- a/libass/meson.build
++++ b/libass/meson.build
+@@ -47,6 +47,7 @@ libass_src = files(
+     'c/c_be_blur.c',
+     'c/c_blend_bitmaps.c',
+     'c/c_blur.c',
++    'c/c_blur_neon.c',
+     'c/c_rasterizer.c',
+     'c/c_rasterizer_neon.c',
+     'c/c_shift.c',
