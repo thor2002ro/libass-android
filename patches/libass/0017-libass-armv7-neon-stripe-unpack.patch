@@ -20,6 +20,32 @@ index 10f59abb7b202ac5a2d935572ecd9a30020f5001..dfefa7888c4798b380857c58fc212bfd
           engine->shrink_horz == ass_shrink_horz16_c ||
           engine->shrink_vert == ass_shrink_vert16_c ||
           engine->expand_horz == ass_expand_horz16_c ||
+@@ -66,16 +68,17 @@ static void check_stripe_unpack(Convert8to16Func func, const char *name, int ali
+             for (int i = 0; i < sizeof(src); i++)
+                 src[i] = rnd();
+ 
+-            for (int i = 0; i < sizeof(dst_ref) / 2; i++)
+-                dst_ref[i] = dst_new[i] = rnd();
++            for (int h = 1; h <= HEIGHT; h++) {
++                for (int i = 0; i < sizeof(dst_ref) / 2; i++)
++                    dst_ref[i] = dst_new[i] = rnd();
+ 
+-            int h = HEIGHT - (rnd() & 3);
+-            call_ref(dst_ref, src, STRIDE, w, h);
+-            call_new(dst_new, src, STRIDE, w, h);
++                call_ref(dst_ref, src, STRIDE, w, h);
++                call_new(dst_new, src, STRIDE, w, h);
+ 
+-            if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
+-                fail();
+-                break;
++                if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
++                    fail();
++                    break;
++                }
+             }
+         }
+ 
 diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
 index 684e479d283c17d73ff429cfb50dfadb278307c6..0f485abf66069c7f7c6224e342c2b06b3dad7a47 100644
 --- a/libass/ass_bitmap_engine.c
@@ -44,7 +70,7 @@ diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 index 3d24ef53cb7147a4b5a88a914049a7f136556238..6d71052c46212228aceb170e101cb82394e558a4 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -73,5 +73,50 @@ static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
+@@ -73,5 +73,81 @@ static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
      *rn = vrhaddq_u16(vhaddq_u16(value, n1), z0);
  }
  
@@ -67,15 +93,49 @@ index 3d24ef53cb7147a4b5a88a914049a7f136556238..6d71052c46212228aceb170e101cb823
 +    size_t rounded_width = (width + STRIPE_MASK) & ~STRIPE_MASK;
 +    size_t step = STRIPE_WIDTH * height;
 +
-+    for (size_t y = 0; y < height; y++) {
++    size_t y = 0;
++    // Consecutive rows occupy adjacent eight-element slices in each stripe.
++    // Walking two rows together shares the stripe and loop-control work.
++    for (; y + 1 < height; y += 2) {
++        int16_t *ptr = dst;
++        size_t x = 0;
++
++        for (; x + 2 * STRIPE_WIDTH <= rounded_width;
++             x += 2 * STRIPE_WIDTH) {
++            uint8x16_t pixels0 = vld1q_u8(src + x);
++            uint8x16_t pixels1 = vld1q_u8(src + src_stride + x);
++            // The regular bitmap keeps adjacent pixels together, while the
++            // blur buffer separates each eight-pixel stripe by its height.
++            vst1q_s16(ptr, vreinterpretq_s16_u16(
++                unpack8(vget_low_u8(pixels0))));
++            vst1q_s16(ptr + STRIPE_WIDTH, vreinterpretq_s16_u16(
++                unpack8(vget_low_u8(pixels1))));
++            ptr += step;
++            vst1q_s16(ptr, vreinterpretq_s16_u16(
++                unpack8(vget_high_u8(pixels0))));
++            vst1q_s16(ptr + STRIPE_WIDTH, vreinterpretq_s16_u16(
++                unpack8(vget_high_u8(pixels1))));
++            ptr += step;
++        }
++
++        if (x < rounded_width) {
++            vst1q_s16(ptr, vreinterpretq_s16_u16(
++                unpack8(vld1_u8(src + x))));
++            vst1q_s16(ptr + STRIPE_WIDTH, vreinterpretq_s16_u16(
++                unpack8(vld1_u8(src + src_stride + x))));
++        }
++
++        dst += 2 * STRIPE_WIDTH;
++        src += 2 * src_stride;
++    }
++
++    if (y < height) {
 +        int16_t *ptr = dst;
 +        size_t x = 0;
 +
 +        for (; x + 2 * STRIPE_WIDTH <= rounded_width;
 +             x += 2 * STRIPE_WIDTH) {
 +            uint8x16_t pixels = vld1q_u8(src + x);
-+            // The regular bitmap keeps adjacent pixels together, while the
-+            // blur buffer separates each eight-pixel stripe by its height.
 +            vst1q_s16(ptr, vreinterpretq_s16_u16(
 +                unpack8(vget_low_u8(pixels))));
 +            ptr += step;
@@ -87,9 +147,6 @@ index 3d24ef53cb7147a4b5a88a914049a7f136556238..6d71052c46212228aceb170e101cb823
 +        if (x < rounded_width)
 +            vst1q_s16(ptr, vreinterpretq_s16_u16(
 +                unpack8(vld1_u8(src + x))));
-+
-+        dst += STRIPE_WIDTH;
-+        src += src_stride;
 +    }
 +}
 +
