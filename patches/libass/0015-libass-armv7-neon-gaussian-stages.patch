@@ -1,5 +1,5 @@
 diff --git a/checkasm/blur.c b/checkasm/blur.c
-index bd5a9f37df9e85df26660ee537ba883da1e185b5..10f59abb7b202ac5a2d935572ecd9a30020f5001 100644
+index bd5a9f37df9e85df26660ee537ba883da1e185b5..58082f127b9c4c34f39f16f1ed55ab65e84d7fcf 100644
 --- a/checkasm/blur.c
 +++ b/checkasm/blur.c
 @@ -27,6 +27,31 @@
@@ -70,7 +70,57 @@ index bd5a9f37df9e85df26660ee537ba883da1e185b5..10f59abb7b202ac5a2d935572ecd9a30
              }
          }
  
-@@ -181,6 +206,9 @@ void checkasm_check_blur(unsigned cpu_flag)
+@@ -99,11 +125,14 @@ static void check_stripe_pack(Convert16to8Func func, const char *name, int align
+ 
+ static void check_fixed_filter(FilterFunc func, const char *name, int align)
+ {
+-    enum { PADDING = FFMAX(32 * HEIGHT, 4 * STRIDE) };
++    enum {
++        FIXED_HEIGHT = 64,
++        PADDING = FFMAX(32 * FIXED_HEIGHT, 4 * STRIDE),
++    };
+ 
+-    ALIGN(int16_t src[STRIDE * HEIGHT], 32);
+-    ALIGN(int16_t dst_ref[2 * STRIDE * HEIGHT + PADDING], 32);
+-    ALIGN(int16_t dst_new[2 * STRIDE * HEIGHT + PADDING], 32);
++    ALIGN(int16_t src[STRIDE * FIXED_HEIGHT], 32);
++    ALIGN(int16_t dst_ref[2 * STRIDE * FIXED_HEIGHT + PADDING], 32);
++    ALIGN(int16_t dst_new[2 * STRIDE * FIXED_HEIGHT + PADDING], 32);
+     declare_func(void,
+                  int16_t *dst, const int16_t *src,
+                  size_t src_width, size_t src_height);
+@@ -113,20 +142,21 @@ static void check_fixed_filter(FilterFunc func, const char *name, int align)
+             for (int i = 0; i < sizeof(src) / 2; i++)
+                 src[i] = rnd() % 0x4001;
+ 
+-            for (int i = 0; i < sizeof(dst_ref) / 2; i++)
+-                dst_ref[i] = dst_new[i] = rnd();
++            for (int h = 1; h <= FIXED_HEIGHT; h++) {
++                for (int i = 0; i < sizeof(dst_ref) / 2; i++)
++                    dst_ref[i] = dst_new[i] = rnd();
+ 
+-            int h = HEIGHT - (rnd() & 3);
+-            call_ref(dst_ref, src, w, h);
+-            call_new(dst_new, src, w, h);
++                call_ref(dst_ref, src, w, h);
++                call_new(dst_new, src, w, h);
+ 
+-            if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
+-                fail();
+-                break;
++                if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
++                    fail();
++                    break;
++                }
+             }
+         }
+ 
+-        bench_new(dst_new, src, STRIDE, HEIGHT);
++        bench_new(dst_new, src, STRIDE, FIXED_HEIGHT);
+     }
+ 
+     report(name, align);
+@@ -181,6 +211,9 @@ void checkasm_check_blur(unsigned cpu_flag)
          ass_bitmap_engine_init(cpu_flag),
          ass_bitmap_engine_init(cpu_flag | ASS_FLAG_WIDE_STRIPE)
      };
@@ -81,10 +131,10 @@ index bd5a9f37df9e85df26660ee537ba883da1e185b5..10f59abb7b202ac5a2d935572ecd9a30
          int align = 1 << engine[i].align_order;
          check_stripe_unpack(engine[i].stripe_unpack, "stripe_unpack%d", align);
 diff --git a/checkasm/shift.c b/checkasm/shift.c
-index 7a7409f3b3b0a35255539b9f3e03a0073ca8ce5f..e7ee3a72941cbda0b3adac28eb8baca7fd74a975 100644
+index 38bf3fa11047181ddfc7414d93b660e01b96a708..989d114f998a8a03a7f9ef58591648e45026c8dd 100644
 --- a/checkasm/shift.c
 +++ b/checkasm/shift.c
-@@ -51,3 +51,4 @@ void checkasm_check_shift(unsigned cpu_flag)
+@@ -56,3 +56,4 @@ void checkasm_check_shift(unsigned cpu_flag)
  {
      BitmapEngine engine = ass_bitmap_engine_init(cpu_flag);
      check_shift(engine.shift);
@@ -127,10 +177,10 @@ index a5520e7cce523e8eb9287df564f41dec2434369f..dab69249a99df462c83bc154148f3a59
      return engine;
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f136556238
+index 0000000000000000000000000000000000000000..1e13b0c246aa31d6e262b68bf6448f265d1cdf88
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,319 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -298,9 +348,32 @@ index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f1
 +    }
 +}
 +
++static inline uint16x8_t shrink_vert_edge_neon(
++    const int16_t *src, ptrdiff_t offs, size_t step)
++{
++    return shrink8(
++        vld1q_s16(get_line(src, offs - 4 * STRIPE_WIDTH, step)),
++        vld1q_s16(get_line(src, offs - 3 * STRIPE_WIDTH, step)),
++        vld1q_s16(get_line(src, offs - 2 * STRIPE_WIDTH, step)),
++        vld1q_s16(get_line(src, offs - 1 * STRIPE_WIDTH, step)),
++        vld1q_s16(get_line(src, offs, step)),
++        vld1q_s16(get_line(src, offs + 1 * STRIPE_WIDTH, step)));
++}
++
++static inline uint16x8_t shrink_vert_inner_neon(const int16_t *center)
++{
++    return shrink8(
++        vld1q_s16(center - 4 * STRIPE_WIDTH),
++        vld1q_s16(center - 3 * STRIPE_WIDTH),
++        vld1q_s16(center - 2 * STRIPE_WIDTH),
++        vld1q_s16(center - 1 * STRIPE_WIDTH),
++        vld1q_s16(center),
++        vld1q_s16(center + 1 * STRIPE_WIDTH));
++}
++
 +void ass_shrink_vert16_neon(int16_t *restrict dst,
-+                             const int16_t *restrict src,
-+                             size_t src_width, size_t src_height)
++                            const int16_t *restrict src,
++                            size_t src_width, size_t src_height)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
@@ -311,14 +384,25 @@ index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f1
 +
 +    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
 +        ptrdiff_t offs = 0;
-+        for (size_t y = 0; y < dst_height; y++) {
-+            uint16x8_t value = shrink8(
-+                vld1q_s16(get_line(src, offs - 4 * STRIPE_WIDTH, step)),
-+                vld1q_s16(get_line(src, offs - 3 * STRIPE_WIDTH, step)),
-+                vld1q_s16(get_line(src, offs - 2 * STRIPE_WIDTH, step)),
-+                vld1q_s16(get_line(src, offs - 1 * STRIPE_WIDTH, step)),
-+                vld1q_s16(get_line(src, offs, step)),
-+                vld1q_s16(get_line(src, offs + 1 * STRIPE_WIDTH, step)));
++        size_t y = 0;
++        for (; y < FFMIN(dst_height, 2); y++) {
++            uint16x8_t value = shrink_vert_edge_neon(src, offs, step);
++            vst1q_s16(dst, vreinterpretq_s16_u16(value));
++            dst += STRIPE_WIDTH;
++            offs += 2 * STRIPE_WIDTH;
++        }
++
++        // Interior outputs consume source rows 2y-4 through 2y+1. Once all
++        // six rows are in range, direct loads avoid repeated edge selection.
++        for (; y < src_height / 2; y++) {
++            uint16x8_t value = shrink_vert_inner_neon(src + offs);
++            vst1q_s16(dst, vreinterpretq_s16_u16(value));
++            dst += STRIPE_WIDTH;
++            offs += 2 * STRIPE_WIDTH;
++        }
++
++        for (; y < dst_height; y++) {
++            uint16x8_t value = shrink_vert_edge_neon(src, offs, step);
 +            vst1q_s16(dst, vreinterpretq_s16_u16(value));
 +            dst += STRIPE_WIDTH;
 +            offs += 2 * STRIPE_WIDTH;
