@@ -1,0 +1,98 @@
+diff --git a/checkasm/blur.c b/checkasm/blur.c
+index 10f59abb7b202ac5a2d935572ecd9a30020f5001..dfefa7888c4798b380857c58fc212bfd2c0e2294 100644
+--- a/checkasm/blur.c
++++ b/checkasm/blur.c
+@@ -34,6 +34,7 @@ static void dispatch_neon_marker(void) {}
+ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
+                                       unsigned cpu_flag)
+ {
++    Convert8to16Func ass_stripe_unpack16_c;
+     Convert16to8Func ass_stripe_pack16_c;
+     FilterFunc ass_shrink_horz16_c, ass_shrink_vert16_c;
+     FilterFunc ass_expand_horz16_c, ass_expand_vert16_c;
+@@ -42,7 +43,8 @@ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
+ 
+     if (checkasm_check_func(marker, "armv7_neon_gaussian_dispatch") &&
+         cpu_flag & ASS_CPU_FLAG_ARM_NEON &&
+-        (engine->stripe_pack == ass_stripe_pack16_c ||
++        (engine->stripe_unpack == ass_stripe_unpack16_c ||
++         engine->stripe_pack == ass_stripe_pack16_c ||
+          engine->shrink_horz == ass_shrink_horz16_c ||
+          engine->shrink_vert == ass_shrink_vert16_c ||
+          engine->expand_horz == ass_expand_horz16_c ||
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 684e479d283c17d73ff429cfb50dfadb278307c6..0f485abf66069c7f7c6224e342c2b06b3dad7a47 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -208,6 +208,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         ShiftFunc ass_shift_neon;
+         BeBlurFunc ass_be_blur_neon;
++        Convert8to16Func ass_stripe_unpack16_neon;
+         Convert16to8Func ass_stripe_pack16_neon;
+         FilterFunc ass_shrink_horz16_neon, ass_shrink_vert16_neon;
+         FilterFunc ass_expand_horz16_neon, ass_expand_vert16_neon;
+@@ -216,6 +217,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         engine.shift = ass_shift_neon;
+         engine.be_blur = ass_be_blur_neon;
+         if (!(mask & ASS_FLAG_WIDE_STRIPE)) {
++            engine.stripe_unpack = ass_stripe_unpack16_neon;
+             engine.stripe_pack = ass_stripe_pack16_neon;
+             engine.shrink_horz = ass_shrink_horz16_neon;
+             engine.shrink_vert = ass_shrink_vert16_neon;
+diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
+index 3d24ef53cb7147a4b5a88a914049a7f136556238..6d71052c46212228aceb170e101cb82394e558a4 100644
+--- a/libass/c/c_blur_neon.c
++++ b/libass/c/c_blur_neon.c
+@@ -73,6 +73,51 @@ static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
+     *rn = vrhaddq_u16(vhaddq_u16(value, n1), z0);
+ }
+ 
++static inline uint16x8_t unpack8(uint8x8_t pixels)
++{
++    uint16x8_t value = vmovl_u8(pixels);
++    value = vorrq_u16(value, vshlq_n_u16(value, 8));
++    return vrshrq_n_u16(value, 2);
++}
++
++void ass_stripe_unpack16_neon(int16_t *restrict dst,
++                               const uint8_t *restrict src,
++                               ptrdiff_t src_stride,
++                               size_t width, size_t height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT) && !(src_stride % ALIGNMENT));
++    ASSUME(width > 0 && height > 0);
++
++    size_t rounded_width = (width + STRIPE_MASK) & ~STRIPE_MASK;
++    size_t step = STRIPE_WIDTH * height;
++
++    for (size_t y = 0; y < height; y++) {
++        int16_t *ptr = dst;
++        size_t x = 0;
++
++        for (; x + 2 * STRIPE_WIDTH <= rounded_width;
++             x += 2 * STRIPE_WIDTH) {
++            uint8x16_t pixels = vld1q_u8(src + x);
++            // The regular bitmap keeps adjacent pixels together, while the
++            // blur buffer separates each eight-pixel stripe by its height.
++            vst1q_s16(ptr, vreinterpretq_s16_u16(
++                unpack8(vget_low_u8(pixels))));
++            ptr += step;
++            vst1q_s16(ptr, vreinterpretq_s16_u16(
++                unpack8(vget_high_u8(pixels))));
++            ptr += step;
++        }
++
++        if (x < rounded_width)
++            vst1q_s16(ptr, vreinterpretq_s16_u16(
++                unpack8(vld1_u8(src + x))));
++
++        dst += STRIPE_WIDTH;
++        src += src_stride;
++    }
++}
++
+ void ass_stripe_pack16_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
+                              const int16_t *restrict src,
+                              size_t width, size_t height)
