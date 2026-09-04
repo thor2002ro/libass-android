@@ -1,5 +1,5 @@
 diff --git a/checkasm/blur.c b/checkasm/blur.c
-index dfefa7888c4798b380857c58fc212bfd2c0e2294..64f17c27b4ac4a6c1b64fdc37ff8f006a19b0271 100644
+index fe080c6e4c31c90b2533d18527be550baf2fb484..5ce53d513b122c89e674c1741bda916041d689dd 100644
 --- a/checkasm/blur.c
 +++ b/checkasm/blur.c
 @@ -38,6 +38,24 @@ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
@@ -60,10 +60,10 @@ index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff
      }
  #endif
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
-index 6d71052c46212228aceb170e101cb82394e558a4..36ccf4c5f7d7d550a0603892099dbf1cb8637bd9 100644
+index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53bfacd82e 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -307,9 +307,132 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+@@ -353,9 +353,142 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
      }
  }
  
@@ -117,6 +117,11 @@ index 6d71052c46212228aceb170e101cb82394e558a4..36ccf4c5f7d7d550a0603892099dbf1c
 +            int16x8_t center = vld1q_s16(center_ptr);
 +            int32x4_t lo = vdupq_n_s32(0x8000);
 +            int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++            // Each wrapper supplies a fixed radius, so expanding the taps
++            // removes the inner counter and repeated coefficient indexing.
++#pragma clang loop unroll(full)
++#endif
 +            for (int i = n; i > 0; i--)
 +                accumulate_param_pair(
 +                    &lo, &hi, center,
@@ -150,6 +155,11 @@ index 6d71052c46212228aceb170e101cb82394e558a4..36ccf4c5f7d7d550a0603892099dbf1c
 +                get_line(src, center_offs, step));
 +            int32x4_t lo = vdupq_n_s32(0x8000);
 +            int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++            // The radius-specific wrappers make this loop finite at compile
++            // time and allow coefficient loads to be scheduled with the taps.
++#pragma clang loop unroll(full)
++#endif
 +            for (int i = n; i > 0; i--)
 +                accumulate_param_pair(
 +                    &lo, &hi, center,
@@ -196,4 +206,3 @@ index 6d71052c46212228aceb170e101cb82394e558a4..36ccf4c5f7d7d550a0603892099dbf1c
 +#undef PARAM_BLUR_WRAPPERS
  
  #endif
-
