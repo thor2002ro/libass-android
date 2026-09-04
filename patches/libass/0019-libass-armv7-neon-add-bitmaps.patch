@@ -1,0 +1,132 @@
+diff --git a/checkasm/blend_bitmaps.c b/checkasm/blend_bitmaps.c
+index bf119a082d66f44501734028c01764128be2490e..3c946522cf5e0c0a7559a45192338a3b58d4670a 100644
+--- a/checkasm/blend_bitmaps.c
++++ b/checkasm/blend_bitmaps.c
+@@ -28,6 +28,10 @@
+ #define SRC1_STRIDE 96
+ #define SRC2_STRIDE 128
+ 
++#if defined(__arm__) && defined(__ARM_NEON)
++static void add_dispatch_marker(void) {}
++#endif
++
+ static void check_blend_bitmaps(BitmapBlendFunc func, const char *name)
+ {
+     ALIGN(uint8_t src[SRC1_STRIDE * HEIGHT], 32);
+@@ -102,6 +106,16 @@ static void check_mul_bitmaps(BitmapMulFunc func)
+ void checkasm_check_blend_bitmaps(unsigned cpu_flag)
+ {
+     BitmapEngine engine = ass_bitmap_engine_init(cpu_flag);
++#if defined(__arm__) && defined(__ARM_NEON)
++    if (cpu_flag & ASS_CPU_FLAG_ARM_NEON) {
++        BitmapBlendFunc ass_add_bitmaps_c;
++        if (checkasm_check_func(add_dispatch_marker,
++                               "add_bitmaps_dispatch") &&
++            engine.add_bitmaps == ass_add_bitmaps_c)
++            fail();
++        report("add_bitmaps_dispatch");
++    }
++#endif
+     check_blend_bitmaps(engine.add_bitmaps, "add_bitmaps");
+     check_blend_bitmaps(engine.imul_bitmaps, "imul_bitmaps");
+     check_mul_bitmaps(engine.mul_bitmaps);
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index 89bafb61f6b63c802738f47f40f7b56c355ee356..442bad42f8e07168d6967c3eb1b98f879d03de25 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -29,6 +29,7 @@ libass_libass_internal_la_SOURCES = \
+     libass/c/rasterizer_template.h libass/c/c_rasterizer.c \
+     libass/c/c_rasterizer_neon.c \
+     libass/c/c_blend_bitmaps.c \
++    libass/c/c_blend_bitmaps_neon.c \
+     libass/c/c_blur_neon.c \
+     libass/c/c_be_blur_neon.c \
+     libass/c/c_shift.c \
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 49f906b3fede3bfc34c76ec4c4e570e871d790fb..65fb59b5186c25806d0e78b93fa311909fd850c8 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -207,6 +207,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+     if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_neon;
++        BitmapBlendFunc ass_add_bitmaps_neon;
+         ShiftFunc ass_shift_neon;
+         BeBlurFunc ass_be_blur_neon;
+         Convert8to16Func ass_stripe_unpack16_neon;
+@@ -217,6 +218,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+             engine.fill_generic = ass_fill_generic_tile16_neon;
+         }
++        engine.add_bitmaps = ass_add_bitmaps_neon;
+         engine.shift = ass_shift_neon;
+         engine.be_blur = ass_be_blur_neon;
+         if (!(mask & ASS_FLAG_WIDE_STRIPE)) {
+diff --git a/libass/c/c_blend_bitmaps_neon.c b/libass/c/c_blend_bitmaps_neon.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e7407379659178f7e07c6b912dad02e2df715b8
+--- /dev/null
++++ b/libass/c/c_blend_bitmaps_neon.c
+@@ -0,0 +1,49 @@
++#include "config.h"
++
++#if defined(__arm__) && defined(__ARM_NEON)
++
++#include "ass_compat.h"
++#include "ass_utils.h"
++
++#include <arm_neon.h>
++#include <stddef.h>
++#include <stdint.h>
++
++
++#define ALIGNMENT  16
++#define BLOCK_SIZE 16
++
++
++void ass_add_bitmaps_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
++                          const uint8_t *restrict src, ptrdiff_t src_stride,
++                          size_t width, size_t height)
++{
++    ASSUME(!(dst_stride % ALIGNMENT));
++    ASSUME(!(src_stride % ALIGNMENT));
++    ASSUME(width > 0 && height > 0);
++
++    for (size_t y = 0; y < height; y++) {
++        size_t x = 0;
++
++        // Saturating byte addition maps the bitmap blend directly to one
++        // NEON instruction without the C path's widening and narrowing.
++        for (; x + BLOCK_SIZE <= width; x += BLOCK_SIZE) {
++            uint8x16_t value = vqaddq_u8(vld1q_u8(dst + x),
++                                         vld1q_u8(src + x));
++            vst1q_u8(dst + x, value);
++        }
++        for (; x < width; x++) {
++            unsigned value = dst[x] + src[x];
++            dst[x] = value > 255 ? 255 : value;
++        }
++
++        dst += dst_stride;
++        src += src_stride;
++    }
++}
++
++
++#undef ALIGNMENT
++#undef BLOCK_SIZE
++
++#endif
+diff --git a/libass/meson.build b/libass/meson.build
+index d0094a598f179d9b29d297e3ec2006e3cdf2ff51..37eb0a4238d1ed21ff5448fc57092398abb47e50 100644
+--- a/libass/meson.build
++++ b/libass/meson.build
+@@ -47,6 +47,7 @@ libass_src = files(
+     'c/c_be_blur.c',
+     'c/c_be_blur_neon.c',
+     'c/c_blend_bitmaps.c',
++    'c/c_blend_bitmaps_neon.c',
+     'c/c_blur.c',
+     'c/c_blur_neon.c',
+     'c/c_rasterizer.c',
+
