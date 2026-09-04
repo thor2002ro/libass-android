@@ -1,0 +1,199 @@
+diff --git a/checkasm/blur.c b/checkasm/blur.c
+index dfefa7888c4798b380857c58fc212bfd2c0e2294..64f17c27b4ac4a6c1b64fdc37ff8f006a19b0271 100644
+--- a/checkasm/blur.c
++++ b/checkasm/blur.c
+@@ -38,6 +38,24 @@ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
+     Convert16to8Func ass_stripe_pack16_c;
+     FilterFunc ass_shrink_horz16_c, ass_shrink_vert16_c;
+     FilterFunc ass_expand_horz16_c, ass_expand_vert16_c;
++    ParamFilterFunc ass_blur4_horz16_c, ass_blur5_horz16_c;
++    ParamFilterFunc ass_blur6_horz16_c, ass_blur7_horz16_c;
++    ParamFilterFunc ass_blur8_horz16_c;
++    ParamFilterFunc ass_blur4_vert16_c, ass_blur5_vert16_c;
++    ParamFilterFunc ass_blur6_vert16_c, ass_blur7_vert16_c;
++    ParamFilterFunc ass_blur8_vert16_c;
++    ParamFilterFunc *horz_c[] = {
++        ass_blur4_horz16_c, ass_blur5_horz16_c, ass_blur6_horz16_c,
++        ass_blur7_horz16_c, ass_blur8_horz16_c,
++    };
++    ParamFilterFunc *vert_c[] = {
++        ass_blur4_vert16_c, ass_blur5_vert16_c, ass_blur6_vert16_c,
++        ass_blur7_vert16_c, ass_blur8_vert16_c,
++    };
++    int param_fallback = 0;
++    for (int i = 0; i < 5; i++)
++        param_fallback |= engine->blur_horz[i] == horz_c[i] ||
++                          engine->blur_vert[i] == vert_c[i];
+     void *marker = cpu_flag & ASS_CPU_FLAG_ARM_NEON ?
+         dispatch_neon_marker : dispatch_c_marker;
+ 
+@@ -48,7 +66,8 @@ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
+          engine->shrink_horz == ass_shrink_horz16_c ||
+          engine->shrink_vert == ass_shrink_vert16_c ||
+          engine->expand_horz == ass_expand_horz16_c ||
+-         engine->expand_vert == ass_expand_vert16_c))
++         engine->expand_vert == ass_expand_vert16_c ||
++         param_fallback))
+         fail();
+     report("armv7_neon_gaussian_dispatch");
+ }
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff495cd657 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -214,6 +214,8 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         Convert16to8Func ass_stripe_pack16_neon;
+         FilterFunc ass_shrink_horz16_neon, ass_shrink_vert16_neon;
+         FilterFunc ass_expand_horz16_neon, ass_expand_vert16_neon;
++        ParamFilterFunc PARAM_BLUR_SET(horz16_neon);
++        ParamFilterFunc PARAM_BLUR_SET(vert16_neon);
+         if (!(mask & ASS_FLAG_LARGE_TILES)) {
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+             engine.fill_generic = ass_fill_generic_tile16_neon;
+@@ -228,6 +230,8 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+             engine.shrink_vert = ass_shrink_vert16_neon;
+             engine.expand_horz = ass_expand_horz16_neon;
+             engine.expand_vert = ass_expand_vert16_neon;
++            PARAM_BLUR_FUNCTION(horz, 16, neon)
++            PARAM_BLUR_FUNCTION(vert, 16, neon)
+         }
+     }
+ #endif
+diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
+index 6d71052c46212228aceb170e101cb82394e558a4..36ccf4c5f7d7d550a0603892099dbf1cb8637bd9 100644
+--- a/libass/c/c_blur_neon.c
++++ b/libass/c/c_blur_neon.c
+@@ -307,9 +307,132 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+     }
+ }
+ 
++static inline int16x8_t finish_param_blur(int16x8_t center,
++                                          int32x4_t lo, int32x4_t hi)
++{
++    int16x8_t correction = vcombine_s16(vshrn_n_s32(lo, 16),
++                                         vshrn_n_s32(hi, 16));
++    return vaddq_s16(center, correction);
++}
++
++static inline void accumulate_param_pair(int32x4_t *lo, int32x4_t *hi,
++                                         int16x8_t center,
++                                         int16x8_t first, int16x8_t second,
++                                         int16_t weight)
++{
++    first = vsubq_s16(first, center);
++    second = vsubq_s16(second, center);
++    *lo = vmlal_n_s16(*lo, vget_low_s16(first), weight);
++    *lo = vmlal_n_s16(*lo, vget_low_s16(second), weight);
++    *hi = vmlal_n_s16(*hi, vget_high_s16(first), weight);
++    *hi = vmlal_n_s16(*hi, vget_high_s16(second), weight);
++}
++
++static void blur_horz16_neon(int16_t *restrict dst,
++                             const int16_t *restrict src,
++                             size_t src_width, size_t src_height,
++                             const int16_t *restrict param, int n)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(src_width > 0 && src_height > 0);
++
++    size_t dst_width = src_width + 2 * n;
++    size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
++    size_t step = STRIPE_WIDTH * src_height;
++    ptrdiff_t offs = 0;
++    int16_t window[3 * STRIPE_WIDTH] __attribute__((aligned(16)));
++    int16_t *ptr = window + 2 * STRIPE_WIDTH;
++
++    for (size_t x = 0; x < dst_width; x += STRIPE_WIDTH) {
++        for (size_t y = 0; y < src_height; y++) {
++            int first = -((2 * n + STRIPE_WIDTH - 1) / STRIPE_WIDTH);
++            for (int i = first; i <= 0; i++) {
++                const int16_t *line = get_line(
++                    src, offs + i * (ptrdiff_t) step, size);
++                vst1q_s16(ptr + i * STRIPE_WIDTH, vld1q_s16(line));
++            }
++
++            const int16_t *center_ptr = ptr - n;
++            int16x8_t center = vld1q_s16(center_ptr);
++            int32x4_t lo = vdupq_n_s32(0x8000);
++            int32x4_t hi = vdupq_n_s32(0x8000);
++            for (int i = n; i > 0; i--)
++                accumulate_param_pair(
++                    &lo, &hi, center,
++                    vld1q_s16(center_ptr - i),
++                    vld1q_s16(center_ptr + i), param[i - 1]);
++
++            vst1q_s16(dst, finish_param_blur(center, lo, hi));
++            dst += STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++    }
++}
++
++static void blur_vert16_neon(int16_t *restrict dst,
++                             const int16_t *restrict src,
++                             size_t src_width, size_t src_height,
++                             const int16_t *restrict param, int n)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT));
++    ASSUME(!((uintptr_t) src % ALIGNMENT));
++    ASSUME(src_width > 0 && src_height > 0);
++
++    size_t dst_height = src_height + 2 * n;
++    size_t step = STRIPE_WIDTH * src_height;
++
++    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
++        ptrdiff_t offs = 0;
++        for (size_t y = 0; y < dst_height; y++) {
++            ptrdiff_t center_offs = offs - n * STRIPE_WIDTH;
++            int16x8_t center = vld1q_s16(
++                get_line(src, center_offs, step));
++            int32x4_t lo = vdupq_n_s32(0x8000);
++            int32x4_t hi = vdupq_n_s32(0x8000);
++            for (int i = n; i > 0; i--)
++                accumulate_param_pair(
++                    &lo, &hi, center,
++                    vld1q_s16(get_line(
++                        src, center_offs - i * STRIPE_WIDTH, step)),
++                    vld1q_s16(get_line(
++                        src, center_offs + i * STRIPE_WIDTH, step)),
++                    param[i - 1]);
++
++            vst1q_s16(dst, finish_param_blur(center, lo, hi));
++            dst += STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++        src += step;
++    }
++}
++
++#define PARAM_BLUR_WRAPPERS(n) \
++    void ass_blur ## n ## _horz16_neon( \
++        int16_t *restrict dst, const int16_t *restrict src, \
++        size_t src_width, size_t src_height, \
++        const int16_t *restrict param) \
++    { \
++        blur_horz16_neon(dst, src, src_width, src_height, param, n); \
++    } \
++    void ass_blur ## n ## _vert16_neon( \
++        int16_t *restrict dst, const int16_t *restrict src, \
++        size_t src_width, size_t src_height, \
++        const int16_t *restrict param) \
++    { \
++        blur_vert16_neon(dst, src, src_width, src_height, param, n); \
++    }
++
++PARAM_BLUR_WRAPPERS(4)
++PARAM_BLUR_WRAPPERS(5)
++PARAM_BLUR_WRAPPERS(6)
++PARAM_BLUR_WRAPPERS(7)
++PARAM_BLUR_WRAPPERS(8)
++
+ 
+ #undef ALIGNMENT
+ #undef STRIPE_WIDTH
+ #undef STRIPE_MASK
++#undef PARAM_BLUR_WRAPPERS
+ 
+ #endif
+
