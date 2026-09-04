@@ -1,0 +1,189 @@
+diff --git a/checkasm/be_blur.c b/checkasm/be_blur.c
+index 1aba5af96a3eff681e312dd115563c7b95907e75..15cf2c21a483f802e5eccb397cc1ecb7595b20a5 100644
+--- a/checkasm/be_blur.c
++++ b/checkasm/be_blur.c
+@@ -26,6 +26,24 @@
+ #define STRIDE 64
+ #define MIN_WIDTH 2
+ 
++#if defined(__arm__) && defined(__ARM_NEON)
++static void dispatch_c_marker(void) {}
++static void dispatch_neon_marker(void) {}
++
++static void check_armv7_neon_dispatch(const BitmapEngine *engine,
++                                      unsigned cpu_flag)
++{
++    BeBlurFunc ass_be_blur_c;
++    void *marker = cpu_flag & ASS_CPU_FLAG_ARM_NEON ?
++        dispatch_neon_marker : dispatch_c_marker;
++
++    if (checkasm_check_func(marker, "armv7_neon_dispatch") &&
++        cpu_flag & ASS_CPU_FLAG_ARM_NEON && engine->be_blur == ass_be_blur_c)
++        fail();
++    report("armv7_neon_dispatch");
++}
++#endif
++
+ static void check_be_blur(BeBlurFunc func)
+ {
+     ALIGN(uint8_t buf_ref[STRIDE * HEIGHT], 32);
+@@ -67,5 +85,8 @@ static void check_be_blur(BeBlurFunc func)
+ void checkasm_check_be_blur(unsigned cpu_flag)
+ {
+     BitmapEngine engine = ass_bitmap_engine_init(cpu_flag);
++#if defined(__arm__) && defined(__ARM_NEON)
++    check_armv7_neon_dispatch(&engine, cpu_flag);
++#endif
+     check_be_blur(engine.be_blur);
+ }
+diff --git a/libass/Makefile_library.am b/libass/Makefile_library.am
+index 246cc856c09262938778489018cefb8de6af1817..89bafb61f6b63c802738f47f40f7b56c355ee356 100644
+--- a/libass/Makefile_library.am
++++ b/libass/Makefile_library.am
+@@ -30,6 +30,7 @@ libass_libass_internal_la_SOURCES = \
+     libass/c/c_rasterizer_neon.c \
+     libass/c/c_blend_bitmaps.c \
+     libass/c/c_blur_neon.c \
++    libass/c/c_be_blur_neon.c \
+     libass/c/c_shift.c \
+     libass/c/c_be_blur.c \
+     libass/c/blur_template.h libass/c/c_blur.c \
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index dab69249a99df462c83bc154148f3a595777374b..684e479d283c17d73ff429cfb50dfadb278307c6 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -207,12 +207,14 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+     if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         ShiftFunc ass_shift_neon;
++        BeBlurFunc ass_be_blur_neon;
+         Convert16to8Func ass_stripe_pack16_neon;
+         FilterFunc ass_shrink_horz16_neon, ass_shrink_vert16_neon;
+         FilterFunc ass_expand_horz16_neon, ass_expand_vert16_neon;
+         if (!(mask & ASS_FLAG_LARGE_TILES))
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+         engine.shift = ass_shift_neon;
++        engine.be_blur = ass_be_blur_neon;
+         if (!(mask & ASS_FLAG_WIDE_STRIPE)) {
+             engine.stripe_pack = ass_stripe_pack16_neon;
+             engine.shrink_horz = ass_shrink_horz16_neon;
+diff --git a/libass/c/c_be_blur_neon.c b/libass/c/c_be_blur_neon.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a861ab031340a9c1c4af88cdc938e49bfe1a536f
+--- /dev/null
++++ b/libass/c/c_be_blur_neon.c
+@@ -0,0 +1,102 @@
++#include "config.h"
++
++#if defined(__arm__) && defined(__ARM_NEON)
++
++#include "ass_compat.h"
++#include "ass_utils.h"
++
++#include <arm_neon.h>
++#include <stddef.h>
++#include <stdint.h>
++
++
++#define ALIGNMENT 16
++#define BLOCK_SIZE 8
++
++
++static inline uint16_t horizontal_pixel(const uint8_t *src,
++                                        size_t x, size_t width)
++{
++    uint16_t left = x ? src[x - 1] : 0;
++    uint16_t right = x + 1 < width ? src[x + 1] : 0;
++    return left + 2 * src[x] + right;
++}
++
++static inline uint16x8_t horizontal_block(const uint8_t *src,
++                                          size_t x, size_t width)
++{
++    uint8x8_t zero = vdup_n_u8(0);
++    uint8x8_t center = vld1_u8(src + x);
++    uint8x8_t left = x ? vld1_u8(src + x - 1) :
++                         vext_u8(zero, center, BLOCK_SIZE - 1);
++    uint8x8_t right = x + BLOCK_SIZE < width ?
++        vld1_u8(src + x + 1) : vext_u8(center, zero, 1);
++    uint16x8_t value = vaddl_u8(left, right);
++    return vaddq_u16(value, vshlq_n_u16(vmovl_u8(center), 1));
++}
++
++void ass_be_blur_neon(uint8_t *restrict buf, ptrdiff_t stride,
++                      size_t width, size_t height, uint16_t *restrict tmp)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++    ASSUME(!((uintptr_t) tmp % ALIGNMENT));
++    ASSUME(width > 1 && height > 1);
++
++    uint16_t *col_pix = tmp;
++    uint16_t *col_sum = tmp + stride;
++    size_t vector_width = width & ~(BLOCK_SIZE - 1);
++
++    // Seed both history rows with the horizontally blurred first row.
++    size_t x = 0;
++    for (; x < vector_width; x += BLOCK_SIZE) {
++        uint16x8_t horizontal = horizontal_block(buf, x, width);
++        vst1q_u16(col_pix + x, horizontal);
++        vst1q_u16(col_sum + x, horizontal);
++    }
++    for (; x < width; x++) {
++        uint16_t horizontal = horizontal_pixel(buf, x, width);
++        col_pix[x] = col_sum[x] = horizontal;
++    }
++
++    for (size_t y = 1; y < height; y++) {
++        uint8_t *dst = buf;
++        buf += stride;
++
++        // col_pix holds the previous horizontal row; col_sum holds the
++        // previous vertical pair. Updating both produces the completed row.
++        x = 0;
++        for (; x < vector_width; x += BLOCK_SIZE) {
++            uint16x8_t horizontal = horizontal_block(buf, x, width);
++            uint16x8_t vertical = vaddq_u16(vld1q_u16(col_pix + x),
++                                            horizontal);
++            uint16x8_t output = vaddq_u16(vld1q_u16(col_sum + x),
++                                          vertical);
++            vst1_u8(dst + x, vshrn_n_u16(output, 4));
++            vst1q_u16(col_pix + x, horizontal);
++            vst1q_u16(col_sum + x, vertical);
++        }
++        for (; x < width; x++) {
++            uint16_t horizontal = horizontal_pixel(buf, x, width);
++            uint16_t vertical = col_pix[x] + horizontal;
++            dst[x] = (col_sum[x] + vertical) >> 4;
++            col_pix[x] = horizontal;
++            col_sum[x] = vertical;
++        }
++    }
++
++    // The bottom edge repeats the last horizontal row in the final sum.
++    x = 0;
++    for (; x < vector_width; x += BLOCK_SIZE) {
++        uint16x8_t output = vaddq_u16(vld1q_u16(col_sum + x),
++                                      vld1q_u16(col_pix + x));
++        vst1_u8(buf + x, vshrn_n_u16(output, 4));
++    }
++    for (; x < width; x++)
++        buf[x] = (col_sum[x] + col_pix[x]) >> 4;
++}
++
++
++#undef ALIGNMENT
++#undef BLOCK_SIZE
++
++#endif
+diff --git a/libass/meson.build b/libass/meson.build
+index fa8de44d0418401ccb2ecca03c3bdf175e7cf4ba..d0094a598f179d9b29d297e3ec2006e3cdf2ff51 100644
+--- a/libass/meson.build
++++ b/libass/meson.build
+@@ -45,6 +45,7 @@ src_coretext = files('ass_coretext.c')
+ 
+ libass_src = files(
+     'c/c_be_blur.c',
++    'c/c_be_blur_neon.c',
+     'c/c_blend_bitmaps.c',
+     'c/c_blur.c',
+     'c/c_blur_neon.c',
