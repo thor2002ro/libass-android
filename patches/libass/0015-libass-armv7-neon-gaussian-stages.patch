@@ -231,10 +231,10 @@ index a5520e7cce523e8eb9287df564f41dec2434369f..dab69249a99df462c83bc154148f3a59
      return engine;
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e24e65ef4cdfdd79e1bf1083bddccfd92eb4d99
+index 0000000000000000000000000000000000000000..3d538b9bf590736d2da416eed8774d19cbcc97ff
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,379 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -480,21 +480,42 @@ index 0000000000000000000000000000000000000000..3e24e65ef4cdfdd79e1bf1083bddccfd
 +    ptrdiff_t offs = 0;
 +
 +    for (size_t x = STRIPE_WIDTH; x < dst_width; x += 2 * STRIPE_WIDTH) {
-+        for (size_t y = 0; y < src_height; y++) {
-+            uint16x8_t prev = vreinterpretq_u16_s16(
-+                vld1q_s16(get_line(src, offs - step, size)));
-+            uint16x8_t curr = vreinterpretq_u16_s16(
-+                vld1q_s16(get_line(src, offs, size)));
-+            uint16x8_t rp, rn;
-+            expand8(vextq_u16(prev, curr, 6),
-+                    vextq_u16(prev, curr, 7), curr, &rp, &rn);
-+            // Expansion emits two pixels per input. The first four pairs stay
-+            // in this stripe; the remaining four belong to the next stripe.
-+            uint16x8x2_t packed = vzipq_u16(rp, rn);
-+            vst1q_s16(dst, vreinterpretq_s16_u16(packed.val[0]));
-+            vst1q_s16(dst + step, vreinterpretq_s16_u16(packed.val[1]));
-+            dst += STRIPE_WIDTH;
-+            offs += STRIPE_WIDTH;
++        bool interior = offs >= (ptrdiff_t) step &&
++                        offs < (ptrdiff_t) size;
++        if (interior) {
++            for (size_t y = 0; y < src_height; y++) {
++                uint16x8_t prev = vreinterpretq_u16_s16(
++                    vld1q_s16(src + offs - step));
++                uint16x8_t curr = vreinterpretq_u16_s16(
++                    vld1q_s16(src + offs));
++                uint16x8_t rp, rn;
++                expand8(vextq_u16(prev, curr, 6),
++                        vextq_u16(prev, curr, 7), curr, &rp, &rn);
++                // Expansion emits two pixels per input. The first four pairs
++                // stay in this stripe; the remaining four belong to the next.
++                uint16x8x2_t packed = vzipq_u16(rp, rn);
++                vst1q_s16(dst, vreinterpretq_s16_u16(packed.val[0]));
++                vst1q_s16(dst + step,
++                          vreinterpretq_s16_u16(packed.val[1]));
++                dst += STRIPE_WIDTH;
++                offs += STRIPE_WIDTH;
++            }
++        } else {
++            for (size_t y = 0; y < src_height; y++) {
++                uint16x8_t prev = vreinterpretq_u16_s16(
++                    vld1q_s16(get_line(src, offs - step, size)));
++                uint16x8_t curr = vreinterpretq_u16_s16(
++                    vld1q_s16(get_line(src, offs, size)));
++                uint16x8_t rp, rn;
++                expand8(vextq_u16(prev, curr, 6),
++                        vextq_u16(prev, curr, 7), curr, &rp, &rn);
++                uint16x8x2_t packed = vzipq_u16(rp, rn);
++                vst1q_s16(dst, vreinterpretq_s16_u16(packed.val[0]));
++                vst1q_s16(dst + step,
++                          vreinterpretq_s16_u16(packed.val[1]));
++                dst += STRIPE_WIDTH;
++                offs += STRIPE_WIDTH;
++            }
 +        }
 +        dst += step;
 +    }
