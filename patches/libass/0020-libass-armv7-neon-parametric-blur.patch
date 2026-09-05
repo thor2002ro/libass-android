@@ -117,10 +117,10 @@ index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff
      }
  #endif
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
-index f7ab6fd5d7aa2b87b551e343d9f373c703984fc2..fe50aadae2264d964f64485b9bc01fa1f7c8d497 100644
+index f7ab6fd5d7aa2b87b551e343d9f373c703984fc2..c9935feb9eca2f7924203f6c5dc1bc80af9cec59 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -447,9 +447,245 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+@@ -447,9 +447,278 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
      }
  }
  
@@ -145,25 +145,55 @@ index f7ab6fd5d7aa2b87b551e343d9f373c703984fc2..fe50aadae2264d964f64485b9bc01fa1
 +    *hi = vmlal_n_s16(*hi, vget_high_s16(second), weight);
 +}
 +
++static inline __attribute__((always_inline)) int16x8_t
++load_horz_window_neon(int16x8_t left, int16x8_t middle,
++                      int16x8_t right, int offset)
++{
++    switch (offset) {
++    case 0:  return left;
++    case 1:  return vextq_s16(left, middle, 1);
++    case 2:  return vextq_s16(left, middle, 2);
++    case 3:  return vextq_s16(left, middle, 3);
++    case 4:  return vextq_s16(left, middle, 4);
++    case 5:  return vextq_s16(left, middle, 5);
++    case 6:  return vextq_s16(left, middle, 6);
++    case 7:  return vextq_s16(left, middle, 7);
++    case 8:  return middle;
++    case 9:  return vextq_s16(middle, right, 1);
++    case 10: return vextq_s16(middle, right, 2);
++    case 11: return vextq_s16(middle, right, 3);
++    case 12: return vextq_s16(middle, right, 4);
++    case 13: return vextq_s16(middle, right, 5);
++    case 14: return vextq_s16(middle, right, 6);
++    case 15: return vextq_s16(middle, right, 7);
++    default: return right;
++    }
++}
++
 +static inline __attribute__((always_inline)) void blur_horz_stripe_neon(
 +    int16_t *restrict dst, const int16_t *restrict src,
 +    ptrdiff_t offs, size_t src_height, size_t size, size_t step,
 +    const int16_t *restrict param, int n, bool edge)
 +{
-+    int first = -((2 * n + STRIPE_WIDTH - 1) / STRIPE_WIDTH);
-+    int16_t window[3 * STRIPE_WIDTH] __attribute__((aligned(16)));
-+    int16_t *ptr = window + 2 * STRIPE_WIDTH;
-+
 +    for (size_t y = 0; y < src_height; y++) {
-+        for (int i = first; i <= 0; i++) {
-+            ptrdiff_t line_offs = offs + i * (ptrdiff_t) step;
-+            const int16_t *line = edge ?
-+                get_line(src, line_offs, size) : src + line_offs;
-+            vst1q_s16(ptr + i * STRIPE_WIDTH, vld1q_s16(line));
++        ptrdiff_t middle_offs = offs - (ptrdiff_t) step;
++        const int16_t *middle_ptr = edge ?
++            get_line(src, middle_offs, size) : src + middle_offs;
++        const int16_t *right_ptr = edge ?
++            get_line(src, offs, size) : src + offs;
++        int16x8_t middle = vld1q_s16(middle_ptr);
++        int16x8_t right = vld1q_s16(right_ptr);
++        int16x8_t left = vdupq_n_s16(0);
++        if (n > 4) {
++            ptrdiff_t left_offs = offs - 2 * (ptrdiff_t) step;
++            const int16_t *left_ptr = edge ?
++                get_line(src, left_offs, size) : src + left_offs;
++            left = vld1q_s16(left_ptr);
 +        }
 +
-+        const int16_t *center_ptr = ptr - n;
-+        int16x8_t center = vld1q_s16(center_ptr);
++        int center_offset = 2 * STRIPE_WIDTH - n;
++        int16x8_t center = load_horz_window_neon(
++            left, middle, right, center_offset);
 +        int32x4_t lo = vdupq_n_s32(0x8000);
 +        int32x4_t hi = vdupq_n_s32(0x8000);
 +#if defined(__clang__)
@@ -174,8 +204,11 @@ index f7ab6fd5d7aa2b87b551e343d9f373c703984fc2..fe50aadae2264d964f64485b9bc01fa1
 +        for (int i = n; i > 0; i--)
 +            accumulate_param_pair(
 +                &lo, &hi, center,
-+                vld1q_s16(center_ptr - i),
-+                vld1q_s16(center_ptr + i), param[i - 1]);
++                load_horz_window_neon(
++                    left, middle, right, center_offset - i),
++                load_horz_window_neon(
++                    left, middle, right, center_offset + i),
++                param[i - 1]);
 +
 +        vst1q_s16(dst, finish_param_blur(center, lo, hi));
 +        dst += STRIPE_WIDTH;
