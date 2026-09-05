@@ -117,10 +117,10 @@ index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff
      }
  #endif
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
-index 4b1552d643d981403e9621b6d544f78d90f1880b..3a4e1f623b60bcd7919f660f5eb645580f06dbdb 100644
+index f7ab6fd5d7aa2b87b551e343d9f373c703984fc2..fe50aadae2264d964f64485b9bc01fa1f7c8d497 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -426,9 +426,206 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+@@ -447,9 +447,245 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
      }
  }
  
@@ -259,6 +259,24 @@ index 4b1552d643d981403e9621b6d544f78d90f1880b..3a4e1f623b60bcd7919f660f5eb64558
 +    return finish_param_blur(center, lo, hi);
 +}
 +
++static inline __attribute__((always_inline)) int16x8_t
++blur_vert_outer_line_neon(
++    const int16_t *src, ptrdiff_t center_offs,
++    const int16_t *param, int n, int first_tap, int direction)
++{
++    int32x4_t lo = vdupq_n_s32(0x8000);
++    int32x4_t hi = vdupq_n_s32(0x8000);
++    for (int i = n; i >= first_tap; i--) {
++        ptrdiff_t sample_offs = center_offs +
++            direction * i * STRIPE_WIDTH;
++        int16x8_t sample = vld1q_s16(src + sample_offs);
++        int16_t weight = param[i - 1];
++        lo = vmlal_n_s16(lo, vget_low_s16(sample), weight);
++        hi = vmlal_n_s16(hi, vget_high_s16(sample), weight);
++    }
++    return vcombine_s16(vshrn_n_s32(lo, 16), vshrn_n_s32(hi, 16));
++}
++
 +static inline __attribute__((always_inline)) void blur_vert16_neon(
 +    int16_t *restrict dst, const int16_t *restrict src,
 +    size_t src_width, size_t src_height,
@@ -273,6 +291,18 @@ index 4b1552d643d981403e9621b6d544f78d90f1880b..3a4e1f623b60bcd7919f660f5eb64558
 +
 +    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
 +        size_t y = 0;
++        if (src_height >= 2 * (size_t) n) {
++            // These centers are transparent and only their positive taps can
++            // reach the source. The height guard keeps every direct load in
++            // range while avoiding the empty half of each symmetric kernel.
++            for (; y < (size_t) n; y++) {
++                ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
++                int first_tap = n - (int) y;
++                vst1q_s16(dst, blur_vert_outer_line_neon(
++                    src, center_offs, param, n, first_tap, 1));
++                dst += STRIPE_WIDTH;
++            }
++        }
 +        for (; y < 2 * (size_t) n; y++) {
 +            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
 +            vst1q_s16(dst, blur_vert_edge_line_neon(
@@ -288,10 +318,19 @@ index 4b1552d643d981403e9621b6d544f78d90f1880b..3a4e1f623b60bcd7919f660f5eb64558
 +            dst += STRIPE_WIDTH;
 +        }
 +
-+        for (; y < dst_height; y++) {
++        size_t outer_start = src_height >= 2 * (size_t) n ?
++            src_height + n : dst_height;
++        for (; y < outer_start; y++) {
 +            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
 +            vst1q_s16(dst, blur_vert_edge_line_neon(
 +                src, center_offs, step, param, n));
++            dst += STRIPE_WIDTH;
++        }
++        for (; y < dst_height; y++) {
++            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
++            int first_tap = (int) (y - n - src_height + 1);
++            vst1q_s16(dst, blur_vert_outer_line_neon(
++                src, center_offs, param, n, first_tap, -1));
 +            dst += STRIPE_WIDTH;
 +        }
 +        src += step;
