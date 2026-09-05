@@ -1,5 +1,5 @@
 diff --git a/checkasm/blur.c b/checkasm/blur.c
-index fe080c6e4c31c90b2533d18527be550baf2fb484..28f2998379018689f165849e2409d2b5d0c3d40f 100644
+index bc2af70c31d2803a70a48baa15128b655bacf252..af677b935182660d7086b3dcbfcd48b99a56bbde 100644
 --- a/checkasm/blur.c
 +++ b/checkasm/blur.c
 @@ -38,6 +38,24 @@ static void check_armv7_neon_dispatch(const BitmapEngine *engine,
@@ -37,7 +37,7 @@ index fe080c6e4c31c90b2533d18527be550baf2fb484..28f2998379018689f165849e2409d2b5
          fail();
      report("armv7_neon_gaussian_dispatch");
  }
-@@ -163,11 +182,14 @@ static void check_fixed_filter(FilterFunc func, const char *name, int align)
+@@ -221,11 +240,14 @@ cleanup:
  
  static void check_param_filter(ParamFilterFunc func, const char *name, int n, int align)
  {
@@ -56,7 +56,7 @@ index fe080c6e4c31c90b2533d18527be550baf2fb484..28f2998379018689f165849e2409d2b5
      int16_t param[8];
      declare_func(void,
                   int16_t *dst, const int16_t *src,
-@@ -179,26 +201,27 @@ static void check_param_filter(ParamFilterFunc func, const char *name, int n, in
+@@ -237,26 +259,27 @@ static void check_param_filter(ParamFilterFunc func, const char *name, int n, in
              for (int i = 0; i < sizeof(src) / 2; i++)
                  src[i] = rnd() % 0x4001;
  
@@ -75,13 +75,13 @@ index fe080c6e4c31c90b2533d18527be550baf2fb484..28f2998379018689f165849e2409d2b5
 +            for (int h = 1; h <= PARAM_HEIGHT; h++) {
 +                for (int i = 0; i < sizeof(dst_ref) / 2; i++)
 +                    dst_ref[i] = dst_new[i] = rnd();
++
++                call_ref(dst_ref, src, w, h, param);
++                call_new(dst_new, src, w, h, param);
  
 -            if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
 -                fail();
 -                break;
-+                call_ref(dst_ref, src, w, h, param);
-+                call_new(dst_new, src, w, h, param);
-+
 +                if (memcmp(dst_ref, dst_new, sizeof(dst_ref))) {
 +                    fail();
 +                    break;
@@ -117,10 +117,10 @@ index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff
      }
  #endif
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
-index eea8a90b765e262d1c5c688f9e858b97ca77e9da..6eaa0054bedf6452e5eede8b6dcc775ff0a19423 100644
+index 4b1552d643d981403e9621b6d544f78d90f1880b..3a4e1f623b60bcd7919f660f5eb645580f06dbdb 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -353,9 +353,177 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+@@ -426,9 +426,206 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
      }
  }
  
@@ -145,50 +145,79 @@ index eea8a90b765e262d1c5c688f9e858b97ca77e9da..6eaa0054bedf6452e5eede8b6dcc775f
 +    *hi = vmlal_n_s16(*hi, vget_high_s16(second), weight);
 +}
 +
-+static void blur_horz16_neon(int16_t *restrict dst,
-+                             const int16_t *restrict src,
-+                             size_t src_width, size_t src_height,
-+                             const int16_t *restrict param, int n)
++static inline __attribute__((always_inline)) void blur_horz_stripe_neon(
++    int16_t *restrict dst, const int16_t *restrict src,
++    ptrdiff_t offs, size_t src_height, size_t size, size_t step,
++    const int16_t *restrict param, int n, bool edge)
++{
++    int first = -((2 * n + STRIPE_WIDTH - 1) / STRIPE_WIDTH);
++    int16_t window[3 * STRIPE_WIDTH] __attribute__((aligned(16)));
++    int16_t *ptr = window + 2 * STRIPE_WIDTH;
++
++    for (size_t y = 0; y < src_height; y++) {
++        for (int i = first; i <= 0; i++) {
++            ptrdiff_t line_offs = offs + i * (ptrdiff_t) step;
++            const int16_t *line = edge ?
++                get_line(src, line_offs, size) : src + line_offs;
++            vst1q_s16(ptr + i * STRIPE_WIDTH, vld1q_s16(line));
++        }
++
++        const int16_t *center_ptr = ptr - n;
++        int16x8_t center = vld1q_s16(center_ptr);
++        int32x4_t lo = vdupq_n_s32(0x8000);
++        int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++        // Each wrapper supplies a fixed radius, so expanding the taps
++        // removes the inner counter and repeated coefficient indexing.
++#pragma clang loop unroll(full)
++#endif
++        for (int i = n; i > 0; i--)
++            accumulate_param_pair(
++                &lo, &hi, center,
++                vld1q_s16(center_ptr - i),
++                vld1q_s16(center_ptr + i), param[i - 1]);
++
++        vst1q_s16(dst, finish_param_blur(center, lo, hi));
++        dst += STRIPE_WIDTH;
++        offs += STRIPE_WIDTH;
++    }
++}
++
++static inline __attribute__((always_inline)) void blur_horz16_neon(
++    int16_t *restrict dst, const int16_t *restrict src,
++    size_t src_width, size_t src_height,
++    const int16_t *restrict param, int n)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
 +    ASSUME(src_width > 0 && src_height > 0);
 +
 +    size_t dst_width = src_width + 2 * n;
-+    size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
++    size_t aligned_width = (src_width + STRIPE_MASK) & ~STRIPE_MASK;
++    size_t size = aligned_width * src_height;
 +    size_t step = STRIPE_WIDTH * src_height;
++    size_t left_edge =
++        ((2 * n + STRIPE_WIDTH - 1) / STRIPE_WIDTH) * STRIPE_WIDTH;
 +    ptrdiff_t offs = 0;
-+    int16_t window[3 * STRIPE_WIDTH] __attribute__((aligned(16)));
-+    int16_t *ptr = window + 2 * STRIPE_WIDTH;
 +
-+    for (size_t x = 0; x < dst_width; x += STRIPE_WIDTH) {
-+        for (size_t y = 0; y < src_height; y++) {
-+            int first = -((2 * n + STRIPE_WIDTH - 1) / STRIPE_WIDTH);
-+            for (int i = first; i <= 0; i++) {
-+                const int16_t *line = get_line(
-+                    src, offs + i * (ptrdiff_t) step, size);
-+                vst1q_s16(ptr + i * STRIPE_WIDTH, vld1q_s16(line));
-+            }
-+
-+            const int16_t *center_ptr = ptr - n;
-+            int16x8_t center = vld1q_s16(center_ptr);
-+            int32x4_t lo = vdupq_n_s32(0x8000);
-+            int32x4_t hi = vdupq_n_s32(0x8000);
-+#if defined(__clang__)
-+            // Each wrapper supplies a fixed radius, so expanding the taps
-+            // removes the inner counter and repeated coefficient indexing.
-+#pragma clang loop unroll(full)
-+#endif
-+            for (int i = n; i > 0; i--)
-+                accumulate_param_pair(
-+                    &lo, &hi, center,
-+                    vld1q_s16(center_ptr - i),
-+                    vld1q_s16(center_ptr + i), param[i - 1]);
-+
-+            vst1q_s16(dst, finish_param_blur(center, lo, hi));
-+            dst += STRIPE_WIDTH;
-+            offs += STRIPE_WIDTH;
-+        }
++    size_t x = 0;
++    for (; x < dst_width && x < left_edge; x += STRIPE_WIDTH) {
++        blur_horz_stripe_neon(
++            dst, src, offs, src_height, size, step, param, n, true);
++        dst += step;
++        offs += step;
++    }
++    for (; x < dst_width && x < aligned_width; x += STRIPE_WIDTH) {
++        blur_horz_stripe_neon(
++            dst, src, offs, src_height, size, step, param, n, false);
++        dst += step;
++        offs += step;
++    }
++    for (; x < dst_width; x += STRIPE_WIDTH) {
++        blur_horz_stripe_neon(
++            dst, src, offs, src_height, size, step, param, n, true);
++        dst += step;
++        offs += step;
 +    }
 +}
 +
