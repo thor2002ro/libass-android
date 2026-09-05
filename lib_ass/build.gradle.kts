@@ -19,27 +19,87 @@ val applyLibassPatches = tasks.register("applyLibassPatches") {
         check(patchFiles.isNotEmpty()) { "Missing libass patches in ${libassPatchDir.asFile.absolutePath}" }
         check(sourceDir.isDirectory) { "Missing libass source: ${sourceDir.absolutePath}" }
 
-        fun git(vararg args: String, ignoreExit: Boolean = false): Int =
-            providers.exec {
+        fun git(
+            vararg args: String,
+            indexFile: File? = null,
+            normalizeLineEndings: Boolean = true,
+            ignoreExit: Boolean = false,
+        ): Pair<Int, String> {
+            val command = mutableListOf("git")
+            if (normalizeLineEndings) {
+                command += listOf("-c", "core.autocrlf=false")
+            }
+            command += args
+            val execution = providers.exec {
                 workingDir = sourceDir
-                commandLine("git", "-c", "core.autocrlf=false", *args)
+                commandLine(command)
+                if (indexFile != null) {
+                    environment("GIT_INDEX_FILE", indexFile.absolutePath)
+                }
                 isIgnoreExitValue = ignoreExit
-            }.result.get().exitValue
+            }
+            return execution.result.get().exitValue to execution.standardOutput.asText.get().trim()
+        }
 
-        if (git("apply", "--reverse", "--check", patchFiles.last().absolutePath, ignoreExit = true) == 0) {
+        val expectedIndex = temporaryDir.resolve("libass-expected.index")
+        val actualIndex = temporaryDir.resolve("libass-actual.index")
+        expectedIndex.delete()
+        actualIndex.delete()
+
+        git("read-tree", "HEAD", indexFile = expectedIndex)
+        for (patchFile in patchFiles) {
+            if (git("apply", "--cached", patchFile.absolutePath, indexFile = expectedIndex, ignoreExit = true).first != 0) {
+                throw org.gradle.api.GradleException("Cannot construct the expected libass patch state at ${patchFile.name}.")
+            }
+        }
+        val expectedTree = git("write-tree", indexFile = expectedIndex).second
+        val headTree = git("rev-parse", "HEAD^{tree}").second
+        val patchedPaths = git("diff-tree", "--no-commit-id", "--name-only", "-r", headTree, expectedTree).second
+            .lineSequence()
+            .filter(String::isNotBlank)
+            .toList()
+
+        fun actualTree(): String {
+            actualIndex.delete()
+            git("read-tree", "HEAD", indexFile = actualIndex)
+            val (presentPaths, absentPaths) = patchedPaths.partition { sourceDir.resolve(it).exists() }
+            if (presentPaths.isNotEmpty()) {
+                git(
+                    "add", "--", *presentPaths.toTypedArray(),
+                    indexFile = actualIndex,
+                    normalizeLineEndings = false,
+                )
+            }
+            if (absentPaths.isNotEmpty()) {
+                git(
+                    "rm", "--cached", "--ignore-unmatch", "--", *absentPaths.toTypedArray(),
+                    indexFile = actualIndex,
+                )
+            }
+            return git("write-tree", indexFile = actualIndex).second
+        }
+
+        val initialTree = actualTree()
+        if (initialTree == expectedTree) {
             return@doLast
         }
+        if (initialTree != headTree) {
+            throw org.gradle.api.GradleException(
+                "The libass source has a stale or partial patch state. Reset " +
+                    "the freshly fetched libass source, then rerun Gradle."
+            )
+        }
+
         for (patchFile in patchFiles) {
-            if (git("apply", "--reverse", "--check", patchFile.absolutePath, ignoreExit = true) == 0) {
-                continue
-            }
-            if (git("apply", "--check", patchFile.absolutePath, ignoreExit = true) != 0) {
+            if (git("apply", patchFile.absolutePath, ignoreExit = true).first != 0) {
                 throw org.gradle.api.GradleException(
                     "Cannot apply libass patch ${patchFile.name}. Reset " +
                         "the freshly fetched libass source, then rerun Gradle."
                 )
             }
-            git("apply", patchFile.absolutePath)
+        }
+        if (actualTree() != expectedTree) {
+            throw org.gradle.api.GradleException("Applied libass patches do not match the expected source tree.")
         }
     }
 }
