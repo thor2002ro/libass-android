@@ -2,7 +2,11 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
-val isWindowsHost = System.getProperty("os.name").contains("Windows", ignoreCase = true)
+val usePrebuiltLibass = providers.gradleProperty("libassUsePrebuilt")
+    .map(String::toBooleanStrict)
+    .getOrElse(
+        System.getProperty("os.name").contains("Windows", ignoreCase = true) || gradle.parent != null
+    )
 val prebuiltLibassAar = rootProject.layout.projectDirectory.file("OUTPUT/lib_ass-release.aar").asFile
 
 android {
@@ -25,6 +29,12 @@ android {
     buildFeatures {
         buildConfig = true
         prefab = true
+    }
+
+    packaging {
+        jniLibs {
+            excludes += setOf("**/libass.so", "**/libc++_shared.so")
+        }
     }
 
     buildTypes {
@@ -58,9 +68,9 @@ android {
 }
 
 dependencies {
-    if (isWindowsHost) {
+    if (usePrebuiltLibass) {
         check(prebuiltLibassAar.isFile) {
-            "Missing ${prebuiltLibassAar.absolutePath}. Run dependencies/libass-android/rebuild-libass-wsl.bat before building on Windows."
+            "Missing ${prebuiltLibassAar.absolutePath}. Run rebuild-libass-wsl.bat before building."
         }
         compileOnly(files(prebuiltLibassAar))
     } else {

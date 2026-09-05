@@ -7,6 +7,7 @@ val libassPatchFiles = libassPatchDir.asFileTree.matching {
     include("*.patch")
 }
 val libassSourceDir = layout.projectDirectory.dir("src/main/cpp/sources/ass")
+val libassPrefabHeadersDir = layout.buildDirectory.dir("generated/prefab-headers")
 
 val applyLibassPatches = tasks.register("applyLibassPatches") {
     group = "build setup"
@@ -103,10 +104,21 @@ val applyLibassPatches = tasks.register("applyLibassPatches") {
         }
     }
 }
+val prepareLibassPrefabHeaders = tasks.register<Sync>("prepareLibassPrefabHeaders") {
+    dependsOn(applyLibassPatches)
+    from(libassSourceDir.dir("libass")) {
+        include("ass.h", "ass_types.h")
+        into("ass")
+    }
+    into(libassPrefabHeadersDir)
+}
 
 tasks.configureEach {
     if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
         dependsOn(applyLibassPatches)
+    }
+    if (name.startsWith("prefab") && name.endsWith("Package")) {
+        dependsOn(prepareLibassPrefabHeaders)
     }
 }
 
@@ -161,7 +173,7 @@ android {
 
     prefab {
         create("ass") {
-            headers = "src/main/cpp/include"
+            headers = libassPrefabHeadersDir.get().asFile.absolutePath
         }
     }
 }

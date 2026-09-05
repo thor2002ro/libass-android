@@ -18,7 +18,7 @@ Expat, Fontconfig, FreeType, FriBidi, HarfBuzz, and libunibreak are built as sta
 
 ### `lib_ass_kt`
 
-Kotlin/JNI wrapper around the native libass API. Windows builds compile against the prebuilt `OUTPUT/lib_ass-release.aar`; Linux builds can use the local `lib_ass` project directly.
+Kotlin/JNI wrapper around the native libass API. Windows and composite builds compile against the prebuilt `OUTPUT/lib_ass-release.aar`; standalone Linux builds use the local `lib_ass` project. Pass `-PlibassUsePrebuilt=true` or `false` to override that automatic selection explicitly.
 
 ### `lib_ass_media`
 
