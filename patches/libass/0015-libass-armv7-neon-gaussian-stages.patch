@@ -231,10 +231,10 @@ index a5520e7cce523e8eb9287df564f41dec2434369f..dab69249a99df462c83bc154148f3a59
      return engine;
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9d11853aa
+index 0000000000000000000000000000000000000000..3e24e65ef4cdfdd79e1bf1083bddccfd92eb4d99
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,358 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -262,27 +262,6 @@ index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9
 +    return (size_t) offs < size ? ptr + offs : zero_line;
 +}
 +
-+static inline uint32x4_t shrink4(uint16x4_t p1p, uint16x4_t p1n,
-+                                 uint16x4_t z0p, uint16x4_t z0n,
-+                                 uint16x4_t n1p, uint16x4_t n1n)
-+{
-+    // Keep the C routine's staged truncation while widening sums that can
-+    // temporarily exceed 16 bits.
-+    uint32x4_t value = vaddl_u16(p1p, p1n);
-+    value = vaddw_u16(value, n1p);
-+    value = vaddw_u16(value, n1n);
-+    value = vshrq_n_u32(value, 1);
-+    value = vaddw_u16(value, z0p);
-+    value = vaddw_u16(value, z0n);
-+    value = vshrq_n_u32(value, 1);
-+    value = vaddw_u16(value, p1n);
-+    value = vaddw_u16(value, n1p);
-+    value = vshrq_n_u32(value, 1);
-+    value = vaddw_u16(value, z0p);
-+    value = vaddw_u16(value, z0n);
-+    return vshrq_n_u32(vaddq_u32(value, vdupq_n_u32(2)), 2);
-+}
-+
 +static inline uint16x8_t shrink8(int16x8_t p1p, int16x8_t p1n,
 +                                 int16x8_t z0p, int16x8_t z0n,
 +                                 int16x8_t n1p, int16x8_t n1n)
@@ -293,13 +272,14 @@ index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9
 +    uint16x8_t d = vreinterpretq_u16_s16(z0n);
 +    uint16x8_t e = vreinterpretq_u16_s16(n1p);
 +    uint16x8_t f = vreinterpretq_u16_s16(n1n);
-+    uint32x4_t lo = shrink4(vget_low_u16(a), vget_low_u16(b),
-+                            vget_low_u16(c), vget_low_u16(d),
-+                            vget_low_u16(e), vget_low_u16(f));
-+    uint32x4_t hi = shrink4(vget_high_u16(a), vget_high_u16(b),
-+                            vget_high_u16(c), vget_high_u16(d),
-+                            vget_high_u16(e), vget_high_u16(f));
-+    return vcombine_u16(vmovn_u32(lo), vmovn_u32(hi));
++    // Inputs are bounded to 0x4000. Pair sums therefore fit in 16 bits, and
++    // halving adds retain the C routine's truncation without separate 32-bit
++    // low/high-lane arithmetic.
++    uint16x8_t cd = vaddq_u16(c, d);
++    uint16x8_t value = vhaddq_u16(vaddq_u16(a, b), vaddq_u16(e, f));
++    value = vhaddq_u16(value, cd);
++    value = vhaddq_u16(value, vaddq_u16(b, e));
++    return vrhaddq_u16(vhaddq_u16(value, cd), vdupq_n_u16(0));
 +}
 +
 +static inline void expand8(uint16x8_t p1, uint16x8_t z0, uint16x8_t n1,
@@ -360,6 +340,28 @@ index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9
 +    }
 +}
 +
++static inline uint16x8_t shrink_horz8_neon(int16x8_t prev,
++                                           int16x8_t curr,
++                                           int16x8_t next)
++{
++    // Each output consumes two input pixels. Deinterleave the three adjacent
++    // stripes into the six taps used by the shrink kernel.
++    int16x8_t first = vextq_s16(prev, curr, 4);
++    int16x8_t second = vextq_s16(curr, next, 4);
++    int16x8x2_t pairs = vuzpq_s16(first, second);
++    int16x4x2_t tail4 = vuzp_s16(vget_high_s16(next),
++                                 vget_high_s16(next));
++    int16x8_t even_tail = vcombine_s16(tail4.val[0], tail4.val[0]);
++    int16x8_t odd_tail = vcombine_s16(tail4.val[1], tail4.val[1]);
++
++    return shrink8(
++        pairs.val[0], pairs.val[1],
++        vextq_s16(pairs.val[0], even_tail, 1),
++        vextq_s16(pairs.val[1], odd_tail, 1),
++        vextq_s16(pairs.val[0], even_tail, 2),
++        vextq_s16(pairs.val[1], odd_tail, 2));
++}
++
 +void ass_shrink_horz16_neon(int16_t *restrict dst,
 +                             const int16_t *restrict src,
 +                             size_t src_width, size_t src_height)
@@ -374,29 +376,28 @@ index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9
 +    ptrdiff_t offs = 0;
 +
 +    for (size_t x = 0; x < dst_width; x += STRIPE_WIDTH) {
-+        for (size_t y = 0; y < src_height; y++) {
-+            int16x8_t prev = vld1q_s16(get_line(src, offs - step, size));
-+            int16x8_t curr = vld1q_s16(get_line(src, offs, size));
-+            int16x8_t next = vld1q_s16(get_line(src, offs + step, size));
-+            // Each output consumes two input pixels. Deinterleave the three
-+            // adjacent stripes into the six taps used by the shrink kernel.
-+            int16x8_t first = vextq_s16(prev, curr, 4);
-+            int16x8_t second = vextq_s16(curr, next, 4);
-+            int16x8x2_t pairs = vuzpq_s16(first, second);
-+            int16x4x2_t tail4 = vuzp_s16(vget_high_s16(next),
-+                                         vget_high_s16(next));
-+            int16x8_t even_tail = vcombine_s16(tail4.val[0], tail4.val[0]);
-+            int16x8_t odd_tail = vcombine_s16(tail4.val[1], tail4.val[1]);
-+
-+            uint16x8_t value = shrink8(
-+                pairs.val[0], pairs.val[1],
-+                vextq_s16(pairs.val[0], even_tail, 1),
-+                vextq_s16(pairs.val[1], odd_tail, 1),
-+                vextq_s16(pairs.val[0], even_tail, 2),
-+                vextq_s16(pairs.val[1], odd_tail, 2));
-+            vst1q_s16(dst, vreinterpretq_s16_u16(value));
-+            dst += STRIPE_WIDTH;
-+            offs += STRIPE_WIDTH;
++        bool interior = offs >= (ptrdiff_t) step &&
++                        offs + 2 * (ptrdiff_t) step <= (ptrdiff_t) size;
++        if (interior) {
++            for (size_t y = 0; y < src_height; y++) {
++                uint16x8_t value = shrink_horz8_neon(
++                    vld1q_s16(src + offs - step),
++                    vld1q_s16(src + offs),
++                    vld1q_s16(src + offs + step));
++                vst1q_s16(dst, vreinterpretq_s16_u16(value));
++                dst += STRIPE_WIDTH;
++                offs += STRIPE_WIDTH;
++            }
++        } else {
++            for (size_t y = 0; y < src_height; y++) {
++                uint16x8_t value = shrink_horz8_neon(
++                    vld1q_s16(get_line(src, offs - step, size)),
++                    vld1q_s16(get_line(src, offs, size)),
++                    vld1q_s16(get_line(src, offs + step, size)));
++                vst1q_s16(dst, vreinterpretq_s16_u16(value));
++                dst += STRIPE_WIDTH;
++                offs += STRIPE_WIDTH;
++            }
 +        }
 +        offs += step;
 +    }
