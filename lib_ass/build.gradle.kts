@@ -129,7 +129,6 @@ android {
 
     defaultConfig {
         minSdk = 21
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
         externalNativeBuild {
             cmake {
@@ -176,10 +175,4 @@ android {
             headers = libassPrefabHeadersDir.get().asFile.absolutePath
         }
     }
-}
-
-dependencies {
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
 }

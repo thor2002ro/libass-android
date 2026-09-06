@@ -13,13 +13,13 @@ enum class AssRenderType {
     /**
      * Use Effect(Powered by canvas)
      */
-    @Deprecated("Use OVERLAY instead.")
+    @Deprecated("Use OVERLAY_CANVAS instead.")
     EFFECTS_CANVAS,
 
     /**
      * Use Effect(Powered by OpenGL)
      */
-    @Deprecated("Use OVERLAY instead.")
+    @Deprecated("Use OVERLAY_OPEN_GL instead.")
     EFFECTS_OPEN_GL,
 
     /**

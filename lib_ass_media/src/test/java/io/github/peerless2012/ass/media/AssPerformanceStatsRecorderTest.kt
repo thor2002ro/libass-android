@@ -83,7 +83,7 @@ class AssPerformanceStatsRecorderTest {
                 0, 0, 3, 4, 0, 0, 0, 0,
                 8, 8, 5, 6, 0, 0, 4, 0,
             ),
-            changed = AssAtlasFrame.CHANGE_CONTENT,
+            changed = AssAtlasFrame.CHANGE_REPLACE,
             dirtyRects = intArrayOf(0, 0, 16, 16, 0, 0, 8, 4),
             contentSerial = 1,
         )

@@ -122,6 +122,7 @@ class AssHandler(
      * Initializes the handler with the provided ExoPlayer instance.
      * @param player The ExoPlayer instance to attach to.
      */
+    @Suppress("DEPRECATION")
     @Synchronized
     fun init(player: ExoPlayer) {
         this.player?.removeListener(this)

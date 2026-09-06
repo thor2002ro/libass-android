@@ -72,7 +72,7 @@ class AssAtlasVertexBufferTest {
             pageWidths = intArrayOf(16),
             pageHeights = intArrayOf(16),
             quads = intArrayOf(1, 2, 4, 5, 0x00000000, 0, 3, 4),
-            changed = AssAtlasFrame.CHANGE_POSITION,
+            changed = AssAtlasFrame.CHANGE_METADATA,
             dirtyRects = IntArray(0),
             contentSerial = 1,
         )
@@ -124,7 +124,7 @@ class AssAtlasVertexBufferTest {
         pageWidths = widths,
         pageHeights = heights,
         quads = quads,
-        changed = AssAtlasFrame.CHANGE_CONTENT,
+        changed = AssAtlasFrame.CHANGE_REPLACE,
         dirtyRects = IntArray(widths.size * 4),
         contentSerial = 1,
     )

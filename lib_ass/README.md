@@ -1,36 +1,16 @@
-# ASS
-A native build library with prefab feature, this module contains libass.so and the header files.
+# Native libass provider
 
-App want to use libass in C/C++ can use this module.
+This module builds `libass.so` and publishes its patched public headers through Prefab.
 
-## How to use
-1. Add MavenCenter to your project
-    ```
-    allprojects {
-        repositories {
-            mavenCentral()
-        }
-    }
-    ```
-2. Enable prefab feature.
-    ```
-    android {
-        buildFeatures {
-            prefab true
-        }
-    }
-    ```
-3. Add dependency
-    ```
-    implementation "io.github.peerless2012:ass:x.x.x"
-    ```
-4. Add prebuild in `CMakeLists.txt`
-    ```
-    # Add these two lines.
-    find_package(lib_ass REQUIRED CONFIG)
-    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE lib_ass::ass)
-    ```
-5. Add libass header in your c/c++ code
-    ```
-    #include "ass.h"
-    ```
+Enable Prefab in the consuming Android module, add the provider AAR as a dependency, and link its imported target:
+
+```cmake
+find_package(lib_ass REQUIRED CONFIG)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE lib_ass::ass)
+```
+
+Include the public API through the exported directory:
+
+```c
+#include <ass/ass.h>
+```
