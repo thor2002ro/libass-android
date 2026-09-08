@@ -1,0 +1,194 @@
+diff --git a/checkasm/rasterizer.c b/checkasm/rasterizer.c
+index bd23150..98b9d8c 100644
+--- a/checkasm/rasterizer.c
++++ b/checkasm/rasterizer.c
+@@ -200,6 +200,7 @@ static void solid_dispatch_marker(void) {}
+ static void solid32_dispatch_marker(void) {}
+ static void halfplane32_dispatch_marker(void) {}
+ static void generic_dispatch_marker(void) {}
++static void generic32_dispatch_marker(void) {}
+ static void merge_dispatch_marker(void) {}
+ #endif
+ 
+@@ -250,6 +251,13 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+             engine[1].fill_halfplane == ass_fill_halfplane_tile32_c)
+             fail();
+         report("fill_halfplane_dispatch_tile32");
++
++        FillGenericTileFunc ass_fill_generic_tile32_c;
++        if (checkasm_check_func(generic32_dispatch_marker,
++                               "fill_generic_dispatch_tile32") &&
++            engine[1].fill_generic == ass_fill_generic_tile32_c)
++            fail();
++        report("fill_generic_dispatch_tile32");
+     }
+ #endif
+     for (int i = 0; i < 2; i++) {
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 98584a9..ff16054 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -210,6 +210,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile32_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_neon;
++        FillGenericTileFunc ass_fill_generic_tile32_neon;
+         MergeTileFunc ass_merge_tile16_neon;
+         BitmapBlendFunc ass_add_bitmaps_neon;
+         BitmapBlendFunc ass_imul_bitmaps_neon;
+@@ -230,6 +231,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         } else {
+             engine.fill_solid = ass_fill_solid_tile32_neon;
+             engine.fill_halfplane = ass_fill_halfplane_tile32_neon;
++            engine.fill_generic = ass_fill_generic_tile32_neon;
+         }
+         engine.add_bitmaps = ass_add_bitmaps_neon;
+         engine.imul_bitmaps = ass_imul_bitmaps_neon;
+diff --git a/libass/c/c_rasterizer_neon.c b/libass/c/c_rasterizer_neon.c
+index fd7bb3a..b69b07a 100644
+--- a/libass/c/c_rasterizer_neon.c
++++ b/libass/c/c_rasterizer_neon.c
+@@ -305,6 +305,143 @@ void ass_fill_generic_tile16_neon(uint8_t *restrict buf, ptrdiff_t stride,
+     }
+ }
+ 
++static inline void update_border_line32_neon(
++    int16_t res[32], int16x8_t va0, int16x8_t va1,
++    int16x8_t va2, int16x8_t va3,
++    int16_t abs_a, int16_t b, int16_t abs_b, int16_t c,
++    int up, int dn)
++{
++    int16_t size = dn - up;
++    int16_t w = FULL_VALUE_32 + (size << 3) - abs_a;
++    w = FFMIN(w, FULL_VALUE_32) << 5;
++
++    int16_t dc_b = abs_b * (int32_t) size >> 6;
++    int16_t dc = (FFMIN(abs_a, dc_b) + 2) >> 2;
++    int16_t base = (int32_t) b * (int16_t) (up + dn) >> 7;
++    int16_t offs1 = size - ((base + dc) * (int32_t) w >> 16);
++    int16_t offs2 = size - ((base - dc) * (int32_t) w >> 16);
++
++    size <<= 1;
++    update_border8(res, va0, c, w, offs1, offs2, size);
++    update_border8(res + 8, va1, c, w, offs1, offs2, size);
++    update_border8(res + 16, va2, c, w, offs1, offs2, size);
++    update_border8(res + 24, va3, c, w, offs1, offs2, size);
++}
++
++static inline void update_line32_8(int16_t *res, int16x8_t va,
++                                   int16_t c, int16_t dc1, int16_t dc2)
++{
++    int16x8_t distance = vsubq_s16(vdupq_n_s16(c), va);
++    int16x8_t c1 = clamp_s16(
++        vaddq_s16(distance, vdupq_n_s16(dc1)), FULL_VALUE_32);
++    int16x8_t c2 = clamp_s16(
++        vaddq_s16(distance, vdupq_n_s16(dc2)), FULL_VALUE_32);
++    int16x8_t value = vshrq_n_s16(vaddq_s16(c1, c2), 2);
++    vst1q_s16(res, vaddq_s16(vld1q_s16(res), value));
++}
++
++void ass_fill_generic_tile32_neon(uint8_t *restrict buf, ptrdiff_t stride,
++                                   const struct segment *restrict line,
++                                   size_t n_lines, int winding)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++
++    int16_t res[32][32] = {{0}};
++    int16_t delta[34] = {0};
++    static const int16_t indices[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
++    int16x8_t step = vdupq_n_s16(8);
++    int16x8_t x0 = vld1q_s16(indices);
++    int16x8_t x1 = vaddq_s16(x0, step);
++    int16x8_t x2 = vaddq_s16(x1, step);
++    int16x8_t x3 = vaddq_s16(x2, step);
++
++    const struct segment *end = line + n_lines;
++    for (; line != end; line++) {
++        assert(line->y_min >= 0 && line->y_min < 64 << 5);
++        assert(line->y_max > 0 && line->y_max <= 64 << 5);
++        assert(line->y_min <= line->y_max);
++
++        int16_t up_delta = line->flags & SEGFLAG_DN ? 4 : 0;
++        int16_t dn_delta = up_delta;
++        if (!line->x_min && (line->flags & SEGFLAG_EXACT_LEFT))
++            dn_delta ^= 4;
++        if (line->flags & SEGFLAG_UL_DR) {
++            int16_t tmp = up_delta;
++            up_delta = dn_delta;
++            dn_delta = tmp;
++        }
++
++        int up = line->y_min >> 6, dn = line->y_max >> 6;
++        int16_t up_pos = line->y_min & 63;
++        int16_t up_delta1 = up_delta * up_pos;
++        int16_t dn_pos = line->y_max & 63;
++        int16_t dn_delta1 = dn_delta * dn_pos;
++        delta[up + 1] -= up_delta1;
++        delta[up] -= (up_delta << 6) - up_delta1;
++        delta[dn + 1] += dn_delta1;
++        delta[dn] += (dn_delta << 6) - dn_delta1;
++        if (line->y_min == line->y_max)
++            continue;
++
++        int16_t a = RESCALE_AB_32(line->a, line->scale);
++        int16_t b = RESCALE_AB_32(line->b, line->scale);
++        int16_t c = RESCALE_C_32(line->c, line->scale) - (a >> 1) - b * up;
++        int16x8_t va0 = vmulq_n_s16(x0, a);
++        int16x8_t va1 = vmulq_n_s16(x1, a);
++        int16x8_t va2 = vmulq_n_s16(x2, a);
++        int16x8_t va3 = vmulq_n_s16(x3, a);
++        int16_t abs_a = a < 0 ? -a : a;
++        int16_t abs_b = b < 0 ? -b : b;
++        int16_t dc = (FFMIN(abs_a, abs_b) + 2) >> 2;
++        int16_t base = FULL_VALUE_32 / 2 - (b >> 1);
++        int16_t dc1 = base + dc;
++        int16_t dc2 = base - dc;
++
++        if (up_pos) {
++            if (dn == up) {
++                update_border_line32_neon(
++                    res[up], va0, va1, va2, va3,
++                    abs_a, b, abs_b, c, up_pos, dn_pos);
++                continue;
++            }
++            update_border_line32_neon(
++                res[up], va0, va1, va2, va3,
++                abs_a, b, abs_b, c, up_pos, 64);
++            up++;
++            c -= b;
++        }
++        for (int y = up; y < dn; y++) {
++            update_line32_8(res[y], va0, c, dc1, dc2);
++            update_line32_8(res[y] + 8, va1, c, dc1, dc2);
++            update_line32_8(res[y] + 16, va2, c, dc1, dc2);
++            update_line32_8(res[y] + 24, va3, c, dc1, dc2);
++            c -= b;
++        }
++        if (dn_pos)
++            update_border_line32_neon(
++                res[dn], va0, va1, va2, va3,
++                abs_a, b, abs_b, c, 0, dn_pos);
++    }
++
++    int16_t cur = 256 * (int8_t) winding;
++    for (int y = 0; y < 32; y++) {
++        cur += delta[y];
++        int16x8_t offset = vdupq_n_s16(cur);
++        int16x8_t v0 = vabsq_s16(vaddq_s16(vld1q_s16(res[y]), offset));
++        int16x8_t v1 = vabsq_s16(
++            vaddq_s16(vld1q_s16(res[y] + 8), offset));
++        int16x8_t v2 = vabsq_s16(
++            vaddq_s16(vld1q_s16(res[y] + 16), offset));
++        int16x8_t v3 = vabsq_s16(
++            vaddq_s16(vld1q_s16(res[y] + 24), offset));
++        vst1_u8(buf, vqmovun_s16(v0));
++        vst1_u8(buf + 8, vqmovun_s16(v1));
++        vst1_u8(buf + 16, vqmovun_s16(v2));
++        vst1_u8(buf + 24, vqmovun_s16(v3));
++        buf += stride;
++    }
++}
++
+ 
+ #undef ALIGNMENT
+ #undef TILE_SIZE
