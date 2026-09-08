@@ -10,6 +10,15 @@ index 92fb571..b87cdeb 100644
  #endif
  
  static void check_blend_bitmaps(BitmapBlendFunc func, const char *name)
+@@ -81,7 +82,7 @@ static void check_mul_bitmaps(BitmapMulFunc func)
+                  size_t width, size_t height);
+ 
+     if (check_func(func, "mul_bitmaps")) {
+-        for (int w = MIN_WIDTH; w < DST_STRIDE; w++) {
++        for (int w = MIN_WIDTH; w <= DST_STRIDE; w++) {
+             for (int i = 0; i < sizeof(src1); i++)
+                 src1[i] = rnd();
+ 
 @@ -122,6 +123,13 @@ void checkasm_check_blend_bitmaps(unsigned cpu_flag)
              engine.imul_bitmaps == ass_imul_bitmaps_c)
              fail();
@@ -48,7 +57,7 @@ diff --git a/libass/c/c_blend_bitmaps_neon.c b/libass/c/c_blend_bitmaps_neon.c
 index f096da6..7bd539b 100644
 --- a/libass/c/c_blend_bitmaps_neon.c
 +++ b/libass/c/c_blend_bitmaps_neon.c
-@@ -79,6 +79,27 @@ void ass_imul_bitmaps_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
+@@ -79,6 +79,42 @@ void ass_imul_bitmaps_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
      }
  }
  
@@ -63,6 +72,21 @@ index f096da6..7bd539b 100644
 +    ASSUME(width > 0 && height > 0);
 +
 +    uint8_t *end = dst + dst_stride * height;
++    // Wide, complete blocks benefit from a 32-byte vectorization factor.
++    // Keep the compact 16-byte loop for short rows and partial blocks.
++    if (width >= 64 && !(width & 31)) {
++        while (dst < end) {
++#pragma clang loop vectorize_width(32) interleave_count(1)
++            for (size_t x = 0; x < width; x++)
++                dst[x] = (src1[x] * src2[x] + 255) >> 8;
++
++            dst += dst_stride;
++            src1 += src1_stride;
++            src2 += src2_stride;
++        }
++        return;
++    }
++
 +    while (dst < end) {
 +        for (size_t x = 0; x < width; x++)
 +            dst[x] = (src1[x] * src2[x] + 255) >> 8;
