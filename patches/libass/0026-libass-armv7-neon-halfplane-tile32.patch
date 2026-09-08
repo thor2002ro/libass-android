@@ -1,0 +1,123 @@
+diff --git a/checkasm/rasterizer.c b/checkasm/rasterizer.c
+index 199ae79..bd23150 100644
+--- a/checkasm/rasterizer.c
++++ b/checkasm/rasterizer.c
+@@ -198,6 +198,7 @@ static void check_merge_tile(MergeTileFunc func, const char *name, int tile_size
+ #if defined(__arm__) && defined(__ARM_NEON)
+ static void solid_dispatch_marker(void) {}
+ static void solid32_dispatch_marker(void) {}
++static void halfplane32_dispatch_marker(void) {}
+ static void generic_dispatch_marker(void) {}
+ static void merge_dispatch_marker(void) {}
+ #endif
+@@ -242,6 +243,13 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+             engine[1].fill_solid == ass_fill_solid_tile32_c)
+             fail();
+         report("fill_solid_dispatch_tile32");
++
++        FillHalfplaneTileFunc ass_fill_halfplane_tile32_c;
++        if (checkasm_check_func(halfplane32_dispatch_marker,
++                               "fill_halfplane_dispatch_tile32") &&
++            engine[1].fill_halfplane == ass_fill_halfplane_tile32_c)
++            fail();
++        report("fill_halfplane_dispatch_tile32");
+     }
+ #endif
+     for (int i = 0; i < 2; i++) {
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 9855618..98584a9 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -208,6 +208,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         FillSolidTileFunc ass_fill_solid_tile16_neon;
+         FillSolidTileFunc ass_fill_solid_tile32_neon;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
++        FillHalfplaneTileFunc ass_fill_halfplane_tile32_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_neon;
+         MergeTileFunc ass_merge_tile16_neon;
+         BitmapBlendFunc ass_add_bitmaps_neon;
+@@ -228,6 +229,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+             engine.merge = ass_merge_tile16_neon;
+         } else {
+             engine.fill_solid = ass_fill_solid_tile32_neon;
++            engine.fill_halfplane = ass_fill_halfplane_tile32_neon;
+         }
+         engine.add_bitmaps = ass_add_bitmaps_neon;
+         engine.imul_bitmaps = ass_imul_bitmaps_neon;
+diff --git a/libass/c/c_rasterizer_neon.c b/libass/c/c_rasterizer_neon.c
+index 3f058f1..fd7bb3a 100644
+--- a/libass/c/c_rasterizer_neon.c
++++ b/libass/c/c_rasterizer_neon.c
+@@ -19,6 +19,11 @@
+     (((ab) * (int64_t) (scale) + ((int64_t) 1 << (45 + TILE_ORDER))) >> (46 + TILE_ORDER))
+ #define RESCALE_C(c, scale) \
+     (((int32_t) ((c) >> (7 + TILE_ORDER)) * (int64_t) (scale) + ((int64_t) 1 << 44)) >> 45)
++#define FULL_VALUE_32 (1 << 9)
++#define RESCALE_AB_32(ab, scale) \
++    (((ab) * (int64_t) (scale) + ((int64_t) 1 << 50)) >> 51)
++#define RESCALE_C_32(c, scale) \
++    (((int32_t) ((c) >> 12) * (int64_t) (scale) + ((int64_t) 1 << 44)) >> 45)
+ 
+ 
+ void ass_fill_solid_tile16_neon(uint8_t *buf, ptrdiff_t stride, int set)
+@@ -106,6 +111,51 @@ void ass_fill_halfplane_tile16_neon(uint8_t *buf, ptrdiff_t stride,
+     }
+ }
+ 
++static inline uint8x8_t fill_halfplane_line32_neon(int16x8_t x,
++                                                    int16_t aa,
++                                                    int16_t cc,
++                                                    int16_t delta)
++{
++    int16x8_t distance = vsubq_s16(vdupq_n_s16(cc), vmulq_n_s16(x, aa));
++    int16x8_t c1 = vaddq_s16(distance, vdupq_n_s16(delta));
++    int16x8_t c2 = vsubq_s16(distance, vdupq_n_s16(delta));
++    int16x8_t zero = vdupq_n_s16(0);
++    int16x8_t full = vdupq_n_s16(FULL_VALUE_32);
++    c1 = vminq_s16(vmaxq_s16(c1, zero), full);
++    c2 = vminq_s16(vmaxq_s16(c2, zero), full);
++    return vqmovun_s16(vshrq_n_s16(vaddq_s16(c1, c2), 2));
++}
++
++void ass_fill_halfplane_tile32_neon(uint8_t *buf, ptrdiff_t stride,
++                                     int32_t a, int32_t b,
++                                     int64_t c, int32_t scale)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++
++    int16_t aa = RESCALE_AB_32(a, scale), bb = RESCALE_AB_32(b, scale);
++    int16_t cc = RESCALE_C_32(c, scale) + FULL_VALUE_32 / 2 -
++                 ((aa + bb) >> 1);
++    int16_t abs_a = aa < 0 ? -aa : aa;
++    int16_t abs_b = bb < 0 ? -bb : bb;
++    int16_t delta = (FFMIN(abs_a, abs_b) + 2) >> 2;
++
++    static const int16_t indices[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
++    int16x8_t step = vdupq_n_s16(8);
++    int16x8_t x0 = vld1q_s16(indices);
++    int16x8_t x1 = vaddq_s16(x0, step);
++    int16x8_t x2 = vaddq_s16(x1, step);
++    int16x8_t x3 = vaddq_s16(x2, step);
++
++    for (int y = 0; y < 32; y++) {
++        vst1_u8(buf, fill_halfplane_line32_neon(x0, aa, cc, delta));
++        vst1_u8(buf + 8, fill_halfplane_line32_neon(x1, aa, cc, delta));
++        vst1_u8(buf + 16, fill_halfplane_line32_neon(x2, aa, cc, delta));
++        vst1_u8(buf + 24, fill_halfplane_line32_neon(x3, aa, cc, delta));
++        buf += stride;
++        cc -= bb;
++    }
++}
++
+ static inline int16x8_t clamp_s16(int16x8_t value, int16_t upper)
+ {
+     value = vmaxq_s16(value, vdupq_n_s16(0));
+@@ -262,5 +312,8 @@ void ass_fill_generic_tile16_neon(uint8_t *restrict buf, ptrdiff_t stride,
+ #undef FULL_VALUE
+ #undef RESCALE_AB
+ #undef RESCALE_C
++#undef FULL_VALUE_32
++#undef RESCALE_AB_32
++#undef RESCALE_C_32
+ 
+ #endif
