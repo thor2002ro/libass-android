@@ -1,0 +1,78 @@
+diff --git a/checkasm/blend_bitmaps.c b/checkasm/blend_bitmaps.c
+index 92fb571..b87cdeb 100644
+--- a/checkasm/blend_bitmaps.c
++++ b/checkasm/blend_bitmaps.c
+@@ -31,6 +31,7 @@
+ #if defined(__arm__) && defined(__ARM_NEON)
+ static void add_dispatch_marker(void) {}
+ static void imul_dispatch_marker(void) {}
++static void mul_dispatch_marker(void) {}
+ #endif
+ 
+ static void check_blend_bitmaps(BitmapBlendFunc func, const char *name)
+@@ -122,6 +123,13 @@ void checkasm_check_blend_bitmaps(unsigned cpu_flag)
+             engine.imul_bitmaps == ass_imul_bitmaps_c)
+             fail();
+         report("imul_bitmaps_dispatch");
++
++        BitmapMulFunc ass_mul_bitmaps_c;
++        if (checkasm_check_func(mul_dispatch_marker,
++                               "mul_bitmaps_dispatch") &&
++            engine.mul_bitmaps == ass_mul_bitmaps_c)
++            fail();
++        report("mul_bitmaps_dispatch");
+     }
+ #endif
+     check_blend_bitmaps(engine.add_bitmaps, "add_bitmaps");
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 0ec69b4..022a912 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -211,6 +211,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         MergeTileFunc ass_merge_tile16_neon;
+         BitmapBlendFunc ass_add_bitmaps_neon;
+         BitmapBlendFunc ass_imul_bitmaps_neon;
++        BitmapMulFunc ass_mul_bitmaps_neon;
+         ShiftFunc ass_shift_neon;
+         BeBlurFunc ass_be_blur_neon;
+         Convert8to16Func ass_stripe_unpack16_neon;
+@@ -227,6 +228,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+         }
+         engine.add_bitmaps = ass_add_bitmaps_neon;
+         engine.imul_bitmaps = ass_imul_bitmaps_neon;
++        engine.mul_bitmaps = ass_mul_bitmaps_neon;
+         engine.shift = ass_shift_neon;
+         engine.be_blur = ass_be_blur_neon;
+         if (!(mask & ASS_FLAG_WIDE_STRIPE)) {
+diff --git a/libass/c/c_blend_bitmaps_neon.c b/libass/c/c_blend_bitmaps_neon.c
+index f096da6..7bd539b 100644
+--- a/libass/c/c_blend_bitmaps_neon.c
++++ b/libass/c/c_blend_bitmaps_neon.c
+@@ -79,6 +79,27 @@ void ass_imul_bitmaps_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
+     }
+ }
+ 
++void ass_mul_bitmaps_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
++                          const uint8_t *restrict src1, ptrdiff_t src1_stride,
++                          const uint8_t *restrict src2, ptrdiff_t src2_stride,
++                          size_t width, size_t height)
++{
++    ASSUME(!((uintptr_t) dst % ALIGNMENT) && !(dst_stride % ALIGNMENT));
++    ASSUME(!(src1_stride % ALIGNMENT));
++    ASSUME(!(src2_stride % ALIGNMENT));
++    ASSUME(width > 0 && height > 0);
++
++    uint8_t *end = dst + dst_stride * height;
++    while (dst < end) {
++        for (size_t x = 0; x < width; x++)
++            dst[x] = (src1[x] * src2[x] + 255) >> 8;
++
++        dst += dst_stride;
++        src1 += src1_stride;
++        src2 += src2_stride;
++    }
++}
++
+ 
+ #undef ALIGNMENT
+ #undef BLOCK_SIZE
