@@ -1,0 +1,70 @@
+diff --git a/checkasm/rasterizer.c b/checkasm/rasterizer.c
+index 67cdeb0..199ae79 100644
+--- a/checkasm/rasterizer.c
++++ b/checkasm/rasterizer.c
+@@ -197,6 +197,7 @@ static void check_merge_tile(MergeTileFunc func, const char *name, int tile_size
+ 
+ #if defined(__arm__) && defined(__ARM_NEON)
+ static void solid_dispatch_marker(void) {}
++static void solid32_dispatch_marker(void) {}
+ static void generic_dispatch_marker(void) {}
+ static void merge_dispatch_marker(void) {}
+ #endif
+@@ -234,6 +235,13 @@ void checkasm_check_rasterizer(unsigned cpu_flag)
+             engine[0].merge == ass_merge_tile16_c)
+             fail();
+         report("merge_dispatch_tile16");
++
++        FillSolidTileFunc ass_fill_solid_tile32_c;
++        if (checkasm_check_func(solid32_dispatch_marker,
++                               "fill_solid_dispatch_tile32") &&
++            engine[1].fill_solid == ass_fill_solid_tile32_c)
++            fail();
++        report("fill_solid_dispatch_tile32");
+     }
+ #endif
+     for (int i = 0; i < 2; i++) {
+diff --git a/libass/ass_bitmap_engine.c b/libass/ass_bitmap_engine.c
+index 022a912..9855618 100644
+--- a/libass/ass_bitmap_engine.c
++++ b/libass/ass_bitmap_engine.c
+@@ -206,6 +206,7 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+ #if defined(__arm__) && defined(__ARM_NEON)
+     if (ass_get_cpu_flags(mask) & ASS_CPU_FLAG_ARM_NEON) {
+         FillSolidTileFunc ass_fill_solid_tile16_neon;
++        FillSolidTileFunc ass_fill_solid_tile32_neon;
+         FillHalfplaneTileFunc ass_fill_halfplane_tile16_neon;
+         FillGenericTileFunc ass_fill_generic_tile16_neon;
+         MergeTileFunc ass_merge_tile16_neon;
+@@ -225,6 +226,8 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
+             engine.fill_halfplane = ass_fill_halfplane_tile16_neon;
+             engine.fill_generic = ass_fill_generic_tile16_neon;
+             engine.merge = ass_merge_tile16_neon;
++        } else {
++            engine.fill_solid = ass_fill_solid_tile32_neon;
+         }
+         engine.add_bitmaps = ass_add_bitmaps_neon;
+         engine.imul_bitmaps = ass_imul_bitmaps_neon;
+diff --git a/libass/c/c_rasterizer_neon.c b/libass/c/c_rasterizer_neon.c
+index fa06fac..3f058f1 100644
+--- a/libass/c/c_rasterizer_neon.c
++++ b/libass/c/c_rasterizer_neon.c
+@@ -34,6 +34,18 @@ void ass_fill_solid_tile16_neon(uint8_t *buf, ptrdiff_t stride, int set)
+     }
+ }
+ 
++void ass_fill_solid_tile32_neon(uint8_t *buf, ptrdiff_t stride, int set)
++{
++    ASSUME(!((uintptr_t) buf % ALIGNMENT) && !(stride % ALIGNMENT));
++
++    uint8x16_t value = vdupq_n_u8(set ? 255 : 0);
++    for (int y = 0; y < 32; y++) {
++        vst1q_u8(buf, value);
++        vst1q_u8(buf + 16, value);
++        buf += stride;
++    }
++}
++
+ 
+ void ass_merge_tile16_neon(uint8_t *restrict buf, ptrdiff_t stride,
+                            const uint8_t *restrict tile)
