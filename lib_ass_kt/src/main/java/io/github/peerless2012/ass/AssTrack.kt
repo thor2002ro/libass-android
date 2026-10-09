@@ -10,7 +10,7 @@ import kotlin.concurrent.withLock
  * @Version V1.0
  * @Description
  */
-class AssTrack(private val ass: Long, private val lock: ReentrantLock) {
+class AssTrack(private val ass: Long, private val lock: ReentrantLock) : AutoCloseable {
 
     companion object {
 
@@ -24,64 +24,88 @@ class AssTrack(private val ass: Long, private val lock: ReentrantLock) {
         external fun nativeAssTrackGetHeight(track: Long): Int
 
         @JvmStatic
+        external fun nativeAssTrackGetYCbCrMatrix(track: Long): Int
+
+        @JvmStatic
         external fun nativeAssTrackGetEvents(track: Long): Array<AssEvent>?
 
         @JvmStatic
         external fun nativeAssTrackClearEvents(track: Long)
 
         @JvmStatic
-        external fun nativeAssTrackReadBuffer(track: Long, byteArray: ByteArray, offset: Int, length: Int)
+        external fun nativeAssTrackReadBuffer(
+            track: Long,
+            byteArray: ByteArray,
+            offset: Int,
+            length: Int,
+        )
 
         @JvmStatic
-        external fun nativeAssTrackReadChunk(track: Long, start: Long, duration: Long, byteArray: ByteArray, offset: Int, length: Int)
+        external fun nativeAssTrackReadChunk(
+            track: Long,
+            start: Long,
+            duration: Long,
+            byteArray: ByteArray,
+            offset: Int,
+            length: Int,
+        )
 
         @JvmStatic
         external fun nativeAssTrackDeinit(track: Long)
     }
 
-    var nativeAssTrack = nativeAssTrackInit(ass)
+    var nativeAssTrack: Long = nativeAssTrackInit(ass)
         private set
 
     @Volatile
     var released = false
         private set
 
-    public fun getWidth(): Int {
-        lock.withLock {
-            if (released || nativeAssTrack == 0L) return 0
-            return nativeAssTrackGetWidth(nativeAssTrack)
+    fun getWidth(): Int = lock.withLock {
+        if (released || nativeAssTrack == 0L) 0 else nativeAssTrackGetWidth(nativeAssTrack)
+    }
+
+    fun getHeight(): Int = lock.withLock {
+        if (released || nativeAssTrack == 0L) 0 else nativeAssTrackGetHeight(nativeAssTrack)
+    }
+
+    fun getYCbCrMatrix(): AssYCbCrMatrix = lock.withLock {
+        if (released || nativeAssTrack == 0L) {
+            AssYCbCrMatrix.UNKNOWN
+        } else {
+            AssYCbCrMatrix.fromNative(nativeAssTrackGetYCbCrMatrix(nativeAssTrack))
         }
     }
 
-    public fun getHeight(): Int {
-        lock.withLock {
-            if (released || nativeAssTrack == 0L) return 0
-            return nativeAssTrackGetHeight(nativeAssTrack)
-        }
+    fun getEvents(): Array<AssEvent>? = lock.withLock {
+        if (released || nativeAssTrack == 0L) null else nativeAssTrackGetEvents(nativeAssTrack)
     }
 
-    public fun getEvents(): Array<AssEvent>? {
-        lock.withLock {
-            if (released || nativeAssTrack == 0L) return null
-            return nativeAssTrackGetEvents(nativeAssTrack)
-        }
-    }
+    fun clearEvent() = clearEvents()
 
-    public fun clearEvent() {
+    fun clearEvents() {
         lock.withLock {
             if (released || nativeAssTrack == 0L) return
             nativeAssTrackClearEvents(nativeAssTrack)
         }
     }
 
-    public fun readBuffer(array: ByteArray, offset: Int = 0, length : Int = array.size) {
+    fun readBuffer(array: ByteArray, offset: Int = 0, length: Int = array.size - offset) {
+        checkRange(array, offset, length)
         lock.withLock {
             if (released || nativeAssTrack == 0L) return
             nativeAssTrackReadBuffer(nativeAssTrack, array, offset, length)
         }
     }
 
-    public fun readChunk(start: Long, duration: Long, array: ByteArray, offset: Int = 0, length: Int = array.size) {
+    fun readChunk(
+        start: Long,
+        duration: Long,
+        array: ByteArray,
+        offset: Int = 0,
+        length: Int = array.size - offset,
+    ) {
+        checkRange(array, offset, length)
         lock.withLock {
             if (released || nativeAssTrack == 0L) return
             nativeAssTrackReadChunk(nativeAssTrack, start, duration, array, offset, length)
@@ -99,8 +123,18 @@ class AssTrack(private val ass: Long, private val lock: ReentrantLock) {
         }
     }
 
+    override fun close() {
+        release()
+    }
+
     protected fun finalize() {
         release()
+    }
+
+    private fun checkRange(array: ByteArray, offset: Int, length: Int) {
+        require(offset >= 0) { "offset must be >= 0" }
+        require(length >= 0) { "length must be >= 0" }
+        require(offset <= array.size - length) { "offset + length must be <= array.size" }
     }
 
 }

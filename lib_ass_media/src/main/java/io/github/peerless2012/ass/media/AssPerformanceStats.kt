@@ -1,5 +1,6 @@
 package io.github.peerless2012.ass.media
 
+import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.AssFrame
 import java.util.Locale
 
@@ -94,6 +95,10 @@ class AssPerformanceStatsCollector(
         recorder.record(renderDurationNs, frame)
     }
 
+    internal fun record(renderDurationNs: Long, frame: AssAtlasFrame?) {
+        recorder.record(renderDurationNs, frame)
+    }
+
     internal fun recordExecutorTimeout() {
         recorder.recordExecutorTimeout()
     }
@@ -107,6 +112,13 @@ internal class AssPerformanceStatsRecorder(
     private val nowNs: () -> Long = System::nanoTime,
     private val slowRenderThresholdMs: Double = 16.67
 ) {
+    private val slowRenderThresholdNs = when {
+        slowRenderThresholdMs.isNaN() -> Long.MAX_VALUE
+        slowRenderThresholdMs <= 0.0 -> -1L
+        slowRenderThresholdMs >= Long.MAX_VALUE / NANOS_PER_MILLI -> Long.MAX_VALUE
+        else -> (slowRenderThresholdMs * NANOS_PER_MILLI).toLong()
+    }
+
     private var firstRenderNs = 0L
     private var lastRenderNs = 0L
     private var renderCount = 0L
@@ -126,6 +138,33 @@ internal class AssPerformanceStatsRecorder(
 
     @Synchronized
     fun record(renderDurationNs: Long, frame: AssFrame?) {
+        val images = frame?.images
+        recordHeader(renderDurationNs, frame?.changed ?: 0, images?.size ?: 0)
+        images?.forEach { image ->
+            recordImagePixels(image.w.toLong() * image.h)
+        }
+    }
+
+    @Synchronized
+    fun record(renderDurationNs: Long, frame: AssAtlasFrame?) {
+        val imageCount = frame?.imageCount ?: 0
+        recordHeader(renderDurationNs, frame?.changed ?: AssAtlasFrame.CHANGE_NONE, imageCount)
+        val quads = frame?.quads ?: return
+        var offset = 0
+        repeat(imageCount) {
+            recordImagePixels(
+                quads[offset + AssAtlasFrame.QUAD_WIDTH].toLong() *
+                    quads[offset + AssAtlasFrame.QUAD_HEIGHT]
+            )
+            offset += AssAtlasFrame.QUAD_STRIDE
+        }
+    }
+
+    private fun recordHeader(
+        renderDurationNs: Long,
+        changed: Int,
+        imageCount: Int,
+    ) {
         val now = nowNs()
         if (renderCount == 0L) {
             firstRenderNs = now
@@ -133,30 +172,29 @@ internal class AssPerformanceStatsRecorder(
         lastRenderNs = now
         renderCount++
 
-        if ((frame?.changed ?: 0) != 0) {
+        if (changed != 0) {
             changedRenderCount++
         }
-        val images = frame?.images
-        if (images.isNullOrEmpty()) {
+        if (imageCount == 0) {
             emptyRenderCount++
         } else {
-            imageCount += images.size
-            maxImageCount = maxOf(maxImageCount, images.size)
-            images.forEach { image ->
-                val pixels = image.w.toLong() * image.h
-                maxBitmapPixels = maxOf(maxBitmapPixels, pixels)
-                totalBitmapPixels += pixels
-            }
+            this.imageCount += imageCount
+            maxImageCount = maxOf(maxImageCount, imageCount)
         }
 
         val durationNs = renderDurationNs.coerceAtLeast(0)
-        if (durationNs.toMs() > slowRenderThresholdMs) {
+        if (durationNs > slowRenderThresholdNs) {
             slowRenderCount++
         }
         totalRenderNs += durationNs
         minRenderNs = minOf(minRenderNs, durationNs)
         maxRenderNs = maxOf(maxRenderNs, durationNs)
         lastRenderDurationNs = durationNs
+    }
+
+    private fun recordImagePixels(pixels: Long) {
+        maxBitmapPixels = maxOf(maxBitmapPixels, pixels)
+        totalBitmapPixels += pixels
     }
 
     @Synchronized
@@ -214,4 +252,8 @@ internal class AssPerformanceStatsRecorder(
     }
 
     private fun Long.toMs(): Double = this / 1_000_000.0
+
+    private companion object {
+        const val NANOS_PER_MILLI = 1_000_000.0
+    }
 }

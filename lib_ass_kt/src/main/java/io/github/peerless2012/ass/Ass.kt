@@ -3,17 +3,10 @@ package io.github.peerless2012.ass
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-/**
- * @Author peerless2012
- * @Email peerless2012@126.com
- * @DateTime 2025/Jan/05 14:15
- * @Version V1.0
- * @Description
- */
-class Ass {
+/** Owns one native libass library instance. */
+class Ass : AutoCloseable {
 
     companion object {
-
         init {
             System.loadLibrary("asskt")
         }
@@ -41,28 +34,24 @@ class Ass {
     var released = false
         private set
 
-    public fun createTrack(): AssTrack {
-        return lock.withLock {
-            if (released || nativeAss == 0L) throw IllegalStateException("Ass already released")
-            AssTrack(nativeAss, lock)
-        }
+    fun createTrack(): AssTrack = lock.withLock {
+        check(!released && nativeAss != 0L) { "Ass already released" }
+        AssTrack(nativeAss, lock)
     }
 
-    public fun createRender(): AssRender {
-        return lock.withLock {
-            if (released || nativeAss == 0L) throw IllegalStateException("Ass already released")
-            AssRender(nativeAss, lock)
-        }
+    fun createRender(): AssRender = lock.withLock {
+        check(!released && nativeAss != 0L) { "Ass already released" }
+        AssRender(nativeAss, lock)
     }
 
-    public fun addFont(name: String, buffer: ByteArray) {
+    fun addFont(name: String, buffer: ByteArray) {
         lock.withLock {
             if (released || nativeAss == 0L) return
             nativeAssAddFont(nativeAss, name, buffer)
         }
     }
 
-    public fun clearFont() {
+    fun clearFont() {
         lock.withLock {
             if (released || nativeAss == 0L) return
             nativeAssClearFont(nativeAss)
@@ -78,6 +67,10 @@ class Ass {
                 nativeAss = 0
             }
         }
+    }
+
+    override fun close() {
+        release()
     }
 
     protected fun finalize() {
