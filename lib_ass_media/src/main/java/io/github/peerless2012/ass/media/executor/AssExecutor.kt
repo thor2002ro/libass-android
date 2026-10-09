@@ -3,6 +3,7 @@ package io.github.peerless2012.ass.media.executor
 import io.github.peerless2012.ass.AssFrame
 import io.github.peerless2012.ass.AssRender
 import io.github.peerless2012.ass.AssTexType
+import io.github.peerless2012.ass.media.AssPerformanceStatsCollector
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -20,12 +21,18 @@ import java.util.concurrent.atomic.AtomicReference
 class AssExecutor internal constructor(
     private val frameRenderer: (Long, AssTexType) -> AssFrame?,
     private val renderWaitTimeoutMs: Long,
+    private val statsCollector: AssPerformanceStatsCollector? = null,
 ) {
 
     constructor(render: AssRender) : this(render::renderFrame, DEFAULT_RENDER_WAIT_TIMEOUT_MS)
 
     internal constructor(frameRenderer: (Long, AssTexType) -> AssFrame?) :
         this(frameRenderer, DEFAULT_RENDER_WAIT_TIMEOUT_MS)
+
+    internal constructor(
+        frameRenderer: (Long, AssTexType) -> AssFrame?,
+        statsCollector: AssPerformanceStatsCollector?
+    ) : this(frameRenderer, DEFAULT_RENDER_WAIT_TIMEOUT_MS, statsCollector)
 
     private val assFrameNotChanged = AssFrame(null, 0)
     private val executor = Executors.newSingleThreadExecutor()
@@ -55,6 +62,7 @@ class AssExecutor internal constructor(
             return deferredFrame.frame
         }
 
+        var timedOut = false
         try {
             if (completion.await(renderWaitTimeoutMs, TimeUnit.MILLISECONDS)) {
                 consumeDeferredFrame(except = completion)?.let { deferredCompletion ->
@@ -66,9 +74,15 @@ class AssExecutor internal constructor(
                 }
                 completedSyncFrame.compareAndSet(completion, null)
                 return completion.frame
+            } else {
+                timedOut = true
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+        }
+
+        if (timedOut) {
+            statsCollector?.recordExecutorTimeout()
         }
 
         // Cover the boundary where rendering completed just after await timed out.
@@ -139,7 +153,10 @@ class AssExecutor internal constructor(
         }
 
         // Complete outside the lock because callbacks may re-enter this executor.
-        supersededRequest?.complete(assFrameNotChanged, publishSyncResult = false)
+        supersededRequest?.let {
+            statsCollector?.recordSupersededRequest()
+            it.complete(assFrameNotChanged, publishSyncResult = false)
+        }
 
         if (rejectRequest) {
             request.complete(assFrameNotChanged, publishSyncResult = false)

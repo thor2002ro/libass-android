@@ -21,5 +21,10 @@ data class AssHandlerConfig(
      * Only applies to OVERLAY and EFFECTS render types, except EFFECTS_ATLAS, which
      * always renders at video size. CUES mode is not affected.
      */
-    val maxRenderPixels: Int = 0
+    val maxRenderPixels: Int = 0,
+
+    /**
+     * Optional stats collector owned by the app.
+     */
+    val performanceStatsCollector: AssPerformanceStatsCollector? = null
 )

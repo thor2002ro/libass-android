@@ -27,10 +27,12 @@ import io.github.peerless2012.ass.media.kt.buildWithAssSupport
 import io.github.peerless2012.ass.media.type.AssRenderType
 import androidx.core.net.toUri
 import io.github.peerless2012.ass.media.AssHandlerConfig
+import io.github.peerless2012.ass.media.AssPerformanceStatsCollector
 
 class MainActivity : AppCompatActivity() {
 
     private var url = "http://192.168.3.6:8080/files/c.mkv"
+    private val assStats = AssPerformanceStatsCollector()
 
     private var renderType = AssRenderType.EFFECTS_ATLAS
 
@@ -81,7 +83,7 @@ class MainActivity : AppCompatActivity() {
             .buildWithAssSupport(
                 this,
                 renderType,
-                AssHandlerConfig(maxRenderPixels = 720*480),
+                AssHandlerConfig(maxRenderPixels = 720*480, performanceStatsCollector = assStats),
                 playerView.subtitleView
             )
         playerView.player = player
