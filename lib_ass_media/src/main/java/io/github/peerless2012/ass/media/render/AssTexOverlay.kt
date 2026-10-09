@@ -122,6 +122,7 @@ class AssTexOverlay(
             atlasRenderer = AssAtlasGlRenderer().also { it.initialize() }
             executor = AssAtlasExecutor(
                 frameRenderer = { timeMs -> handler.renderAtlasFrame(timeMs, maxAtlasSize) },
+                statsCollector = handler.config.performanceStatsCollector,
             )
             unpremultiplyProgram = GlProgram(
                 FULLSCREEN_VERTEX_SHADER,
