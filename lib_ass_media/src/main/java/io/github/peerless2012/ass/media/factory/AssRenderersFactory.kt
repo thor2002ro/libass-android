@@ -23,7 +23,20 @@ import io.github.peerless2012.ass.media.type.AssRenderType
  * @Description
  */
 @UnstableApi
-class AssRenderersFactory(private val assHandler: AssHandler, private val renderersFactory: RenderersFactory): RenderersFactory {
+class AssRenderersFactory(
+    private val assHandler: AssHandler,
+    private val renderersFactory: RenderersFactory
+): RenderersFactory {
+    private var releaseAssHandler = false
+
+    internal constructor(
+        assHandler: AssHandler,
+        renderersFactory: RenderersFactory,
+        releaseAssHandler: Boolean
+    ) : this(assHandler, renderersFactory) {
+        this.releaseAssHandler = releaseAssHandler
+    }
+
     override fun createRenderers(
         eventHandler: Handler,
         videoRendererEventListener: VideoRendererEventListener,
@@ -41,7 +54,7 @@ class AssRenderersFactory(private val assHandler: AssHandler, private val render
                 Log.e("AssRenderersFactory", "No MediaCodecVideoRenderer found, EFFECTS_ATLAS subtitles will be drawn at the wrong time or not at all")
             }
         }
-        return (renderers + AssRenderer(assHandler)).toTypedArray()
+        return (renderers + AssRenderer(assHandler, releaseAssHandler)).toTypedArray()
     }
 
     override fun createSecondaryRenderer(

@@ -1,6 +1,7 @@
 package io.github.peerless2012.ass.media.extractor
 
 import androidx.annotation.OptIn
+import androidx.media3.common.ParserException
 import androidx.media3.common.util.ParsableByteArray
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.ExtractorInput
@@ -19,9 +20,7 @@ open class AssMatroskaExtractor(
     flags: Int = 0
 ) : MatroskaExtractor(subtitleParserFactory, flags) {
 
-    private var currentAttachmentName: String? = null
-    private var currentAttachmentMime: String? = null
-    private var currentAttachmentData: ByteArray? = null
+    private var currentAttachment = MatroskaAttachment()
 
     internal val subtitleSample = subtitleSampleField.get(this) as ParsableByteArray
 
@@ -32,6 +31,7 @@ open class AssMatroskaExtractor(
             ID_FILE_NAME -> EbmlProcessor.ELEMENT_TYPE_STRING
             ID_FILE_MIME_TYPE -> EbmlProcessor.ELEMENT_TYPE_STRING
             ID_FILE_DATA -> EbmlProcessor.ELEMENT_TYPE_BINARY
+            ID_FILE_UID -> EbmlProcessor.ELEMENT_TYPE_UNSIGNED_INT
             else -> super.getElementType(id)
         }
     }
@@ -54,7 +54,10 @@ open class AssMatroskaExtractor(
                 }
                 super.startMasterElement(id, contentPosition, contentSize)
             }
-            ID_ATTACHED_FILE -> clearAttachment()
+            ID_ATTACHED_FILE -> {
+                currentAttachment.reservation?.let(assHandler::discardEmbeddedFont)
+                currentAttachment = MatroskaAttachment()
+            }
             else -> super.startMasterElement(id, contentPosition, contentSize)
         }
     }
@@ -68,18 +71,19 @@ open class AssMatroskaExtractor(
                 super.endMasterElement(id)
             }
             ID_ATTACHED_FILE -> {
-                val attachmentName = requireNotNull(currentAttachmentName)
-                val attachmentMime = requireNotNull(currentAttachmentMime)
-                val attachmentData = requireNotNull(currentAttachmentData)
-
-                // Detect fonts like the spec says: https://github.com/ietf-wg-cellar/matroska-specification/blob/1a943ead9bb4c67b02b966cebafe51c8c074e703/cellar-matroska/attachments.md?plain=1#L87-L111
-                val isFont = attachmentMime in fontMimeTypes ||
-                    (attachmentMime == "application/octet-stream" &&
-                        fontExtensions.any { attachmentName.lowercase().endsWith(it) })
-                if (isFont) {
-                    assHandler.addFont(attachmentName, attachmentData)
+                val reservation = currentAttachment.reservation
+                val font = currentAttachment.fontOrNull()
+                if (reservation != null && font != null) {
+                    assHandler.addReservedEmbeddedFont(
+                        reservation,
+                        currentAttachment.uid,
+                        font.first,
+                        font.second
+                    )
+                } else if (reservation != null) {
+                    assHandler.discardEmbeddedFont(reservation)
                 }
-                clearAttachment()
+                currentAttachment = MatroskaAttachment()
             }
             else -> super.endMasterElement(id)
         }
@@ -87,26 +91,63 @@ open class AssMatroskaExtractor(
 
     override fun stringElement(id: Int, value: String) {
         when (id) {
-            ID_FILE_NAME -> currentAttachmentName = value
-            ID_FILE_MIME_TYPE -> currentAttachmentMime = value
+            ID_FILE_NAME -> currentAttachment.name = value
+            ID_FILE_MIME_TYPE -> currentAttachment.mime = value
             else -> super.stringElement(id, value)
+        }
+    }
+
+    override fun integerElement(id: Int, value: Long) {
+        when (id) {
+            ID_FILE_UID -> currentAttachment.uid = value
+            else -> super.integerElement(id, value)
         }
     }
 
     override fun binaryElement(id: Int, contentSize: Int, input: ExtractorInput) {
         when (id) {
             ID_FILE_DATA -> {
-                currentAttachmentData = ByteArray(contentSize)
-                input.readFully(currentAttachmentData!!, 0, contentSize)
+                if (contentSize < 0) {
+                    throw ParserException.createForMalformedContainer(
+                        "Invalid attachment size: $contentSize",
+                        null
+                    )
+                }
+
+                if (currentAttachment.hasFileData) {
+                    input.skipFully(contentSize)
+                    return
+                }
+                currentAttachment.hasFileData = true
+
+                val mayBeFont = currentAttachment.mayBeFont
+                val reservation = if (mayBeFont) {
+                    assHandler.reserveEmbeddedFont(currentAttachment.uid, contentSize)
+                } else {
+                    null
+                }
+                if (reservation != null) {
+                    try {
+                        val data = ByteArray(contentSize)
+                        input.readFully(data, 0, contentSize)
+                        currentAttachment.data = data
+                        currentAttachment.reservation = reservation
+                    } catch (error: Throwable) {
+                        assHandler.cancelEmbeddedFont(reservation)
+                        throw error
+                    }
+                } else {
+                    input.skipFully(contentSize)
+                }
             }
             else -> super.binaryElement(id, contentSize, input)
         }
     }
 
-    private fun clearAttachment() {
-        currentAttachmentName = null
-        currentAttachmentMime = null
-        currentAttachmentData = null
+    override fun seek(position: Long, timeUs: Long) {
+        currentAttachment.reservation?.let(assHandler::discardEmbeddedFont)
+        currentAttachment = MatroskaAttachment()
+        super.seek(position, timeUs)
     }
 
     companion object {
@@ -117,12 +158,13 @@ open class AssMatroskaExtractor(
         const val ID_FILE_NAME = 0x466E
         const val ID_FILE_MIME_TYPE = 0x4660
         const val ID_FILE_DATA = 0x465C
+        const val ID_FILE_UID = 0x46AE
 
         val fontMimeTypes = listOf(
-            "font/collection",
             "font/ttf",
             "font/otf",
             "font/sfnt",
+            "font/collection",
             "font/woff",
             "font/woff2",
             "application/font-sfnt",
@@ -142,5 +184,39 @@ open class AssMatroskaExtractor(
         val subtitleSampleField = MatroskaExtractor::class.java.getDeclaredField("subtitleSample").apply {
             isAccessible = true
         }
+    }
+}
+
+internal class MatroskaAttachment {
+    var name: String? = null
+    var mime: String? = null
+    var data: ByteArray? = null
+    var uid: Long? = null
+    var hasFileData = false
+    var reservation: AssHandler.EmbeddedFontReservation? = null
+
+    val mayBeFont: Boolean
+        get() = mime == null ||
+            mime.equals("application/octet-stream", ignoreCase = true) && name == null ||
+            isFont()
+
+    fun fontOrNull(): Pair<String, ByteArray>? {
+        val name = name ?: return null
+        val data = data ?: return null
+        return if (isFont()) name to data else null
+    }
+
+    private fun isFont(): Boolean {
+        val mime = mime?.lowercase()
+        return mime in AssMatroskaExtractor.fontMimeTypes ||
+            mime == "application/octet-stream" && hasFontExtension()
+    }
+
+    private fun hasFontExtension() = name
+        ?.substringAfterLast('.', "")
+        ?.lowercase() in fontExtensions
+
+    private companion object {
+        val fontExtensions = setOf("ttf", "otf", "ttc")
     }
 }
