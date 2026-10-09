@@ -1,0 +1,56 @@
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index 457e92c..728a6ab 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -2724,6 +2724,35 @@ static double restore_blur(int qblur)
+     return sigma * sigma;
+ }
+ 
++static inline int subpixel_abs_ceil(int32_t x)
++{
++    int64_t abs_x = x < 0 ? -(int64_t) x : x;
++    return (int) ((abs_x + 63) >> 6);
++}
++
++static bool bitmap_may_hit_frame(const Bitmap *bm, ASS_Vector pos,
++                                 const FilterDesc *filter,
++                                 int frame_w, int frame_h)
++{
++    if (!bm || !bm->buffer || frame_w <= 0 || frame_h <= 0)
++        return false;
++
++    int64_t xpad = ass_blur_padding(restore_blur(filter->blur_x)) +
++        ass_be_padding(filter->be);
++    int64_t ypad = ass_blur_padding(restore_blur(filter->blur_y)) +
++        ass_be_padding(filter->be);
++    if (filter->flags & FILTER_NONZERO_SHADOW) {
++        xpad += subpixel_abs_ceil(filter->shadow.x);
++        ypad += subpixel_abs_ceil(filter->shadow.y);
++    }
++
++    int64_t left = pos.x + bm->left - xpad;
++    int64_t top = pos.y + bm->top - ypad;
++    int64_t right = pos.x + bm->left + bm->w + xpad;
++    int64_t bottom = pos.y + bm->top + bm->h + ypad;
++    return left < frame_w && right > 0 && top < frame_h && bottom > 0;
++}
++
+ // Convert glyphs to bitmaps, combine them, apply blur, generate shadows.
+ static void render_and_combine_glyphs(RenderContext *state,
+                                       double device_x, double device_y)
+@@ -2856,6 +2885,15 @@ static void render_and_combine_glyphs(RenderContext *state,
+             if (!info->bm && !info->bm_o)
+                 continue;
+ 
++            if (!bitmap_may_hit_frame(info->bm, pos, &current_info->filter,
++                                      render_priv->width, render_priv->height))
++                info->bm = NULL;
++            if (!bitmap_may_hit_frame(info->bm_o, pos_o, &current_info->filter,
++                                      render_priv->width, render_priv->height))
++                info->bm_o = NULL;
++            if (!info->bm && !info->bm_o)
++                continue;
++
+             if (current_info->bitmap_count >= current_info->max_bitmap_count) {
+                 size_t new_size = 2 * current_info->max_bitmap_count;
+                 if (!ASS_REALLOC_ARRAY(current_info->bitmaps, new_size))
