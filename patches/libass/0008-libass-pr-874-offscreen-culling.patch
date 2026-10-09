@@ -1,0 +1,336 @@
+diff --git a/libass/ass_bitmap.c b/libass/ass_bitmap.c
+index ef970b6..4182b45 100644
+--- a/libass/ass_bitmap.c
++++ b/libass/ass_bitmap.c
+@@ -147,7 +147,8 @@ bool ass_copy_bitmap(const BitmapEngine *engine, Bitmap *dst, const Bitmap *src)
+ }
+ 
+ bool ass_outline_to_bitmap(RenderContext *state, Bitmap *bm,
+-                           ASS_Outline *outline1, ASS_Outline *outline2)
++                           ASS_Outline *outline1, ASS_Outline *outline2,
++                           ASS_Rect *clip)
+ {
+     ASS_Renderer *render_priv = state->renderer;
+     RasterizerData *rst = &state->rasterizer;
+@@ -167,6 +168,19 @@ bool ass_outline_to_bitmap(RenderContext *state, Bitmap *bm,
+     int32_t y_min = (rst->bbox.y_min - 64) >> 6;
+     int32_t x_max = (rst->bbox.x_max + 64) >> 6;
+     int32_t y_max = (rst->bbox.y_max + 64) >> 6;
++
++
++    if (clip) {
++        x_min = FFMAX(x_min, clip->x_min);
++        y_min = FFMAX(y_min, clip->y_min);
++        x_max = FFMIN(x_max, clip->x_max);
++        y_max = FFMIN(y_max, clip->y_max);
++
++        if (x_max <= x_min || y_max <= y_min) {
++            return false;
++        }
++    }
++
+     int32_t w = x_max - x_min;
+     int32_t h = y_max - y_min;
+ 
+diff --git a/libass/ass_bitmap.h b/libass/ass_bitmap.h
+index 1605663..cf86543 100644
+--- a/libass/ass_bitmap.h
++++ b/libass/ass_bitmap.h
+@@ -42,11 +42,13 @@ void ass_free_bitmap(Bitmap *bm);
+ struct render_context;
+ 
+ bool ass_outline_to_bitmap(struct render_context *state, Bitmap *bm,
+-                           ASS_Outline *outline1, ASS_Outline *outline2);
++                           ASS_Outline *outline1, ASS_Outline *outline2,
++                           ASS_Rect *clip);
+ 
+ void ass_synth_blur(const BitmapEngine *engine, Bitmap *bm,
+                     int be, double blur_r2x, double blur_r2y);
+ 
++uint32_t ass_blur_padding(double r2);
+ bool ass_gaussian_blur(const BitmapEngine *engine, Bitmap *bm, double r2x, double r2y);
+ void ass_shift_bitmap(const BitmapEngine *engine, Bitmap *bm, int32_t shift_x, int32_t shift_y);
+ void ass_fix_outline(Bitmap *bm_g, Bitmap *bm_o);
+diff --git a/libass/ass_blur.c b/libass/ass_blur.c
+index ec91a92..5adb16a 100644
+--- a/libass/ass_blur.c
++++ b/libass/ass_blur.c
+@@ -145,26 +145,54 @@ typedef struct {
+     int16_t coeff[8];
+ } BlurMethod;
+ 
+-static void find_best_method(BlurMethod *blur, double r2)
++static void find_scale(BlurMethod *blur, double r2)
+ {
+-    double mu[8];
+     if (r2 < 0.5) {
+         blur->level = 0;
+         blur->radius = 4;
+-        mu[1] = 0.085 * r2 * r2 * r2;
+-        mu[0] = 0.5 * r2 - 4 * mu[1];
+-        mu[2] = mu[3] = 0;
+     } else {
+         double frac = frexp(sqrt(0.11569 * r2 + 0.20591047), &blur->level);
+         double mul = pow(0.25, blur->level);
+         blur->radius = 8 - (int) ((10.1525 + 0.8335 * mul) * (1 - frac));
+         blur->radius = FFMAX(blur->radius, 4);
++    }
++}
++
++static void find_best_method(BlurMethod *blur, double r2)
++{
++    find_scale(blur, r2);
++
++    double mu[8];
++    if (r2 < 0.5) {
++        mu[1] = 0.085 * r2 * r2 * r2;
++        mu[0] = 0.5 * r2 - 4 * mu[1];
++        mu[2] = mu[3] = 0;
++    } else {
++        double mul = pow(0.25, blur->level);
+         calc_coeff(mu, blur->radius, r2, mul);
+     }
++
+     for (int i = 0; i < blur->radius; i++)
+         blur->coeff[i] = (int) (0x10000 * mu[i] + 0.5);
+ }
+ 
++static int blur_offset(const BlurMethod *blur)
++{
++    return ((2 * blur->radius + 9) << blur->level) - 5;
++}
++
++static uint32_t blurred_dim(uint32_t d, const BlurMethod *blur)
++{
++    return ((d + blur_offset(blur)) & ~((1 << blur->level) - 1)) - 4;
++}
++
++uint32_t ass_blur_padding(double r2)
++{
++    BlurMethod blur;
++    find_scale(&blur, r2);
++    return (blur_offset(&blur) + 1) / 2;
++}
++
+ /**
+  * \brief Perform approximate gaussian blur
+  * \param r2x in: desired standard deviation along X axis squared
+@@ -179,10 +207,8 @@ bool ass_gaussian_blur(const BitmapEngine *engine, Bitmap *bm, double r2x, doubl
+     else find_best_method(&blur_y, r2y);
+ 
+     uint32_t w = bm->w, h = bm->h;
+-    int offset_x = ((2 * blur_x.radius + 9) << blur_x.level) - 5;
+-    int offset_y = ((2 * blur_y.radius + 9) << blur_y.level) - 5;
+-    uint32_t end_w = ((w + offset_x) & ~((1 << blur_x.level) - 1)) - 4;
+-    uint32_t end_h = ((h + offset_y) & ~((1 << blur_y.level) - 1)) - 4;
++    uint32_t end_w = blurred_dim(w, &blur_x);
++    uint32_t end_h = blurred_dim(h, &blur_y);
+ 
+     const int stripe_width = 1 << (engine->align_order - 1);
+     uint64_t size = (((uint64_t) end_w + stripe_width - 1) & ~(stripe_width - 1)) * end_h;
+diff --git a/libass/ass_cache_template.h b/libass/ass_cache_template.h
+index 84d6f4c..f9c928a 100644
+--- a/libass/ass_cache_template.h
++++ b/libass/ass_cache_template.h
+@@ -8,6 +8,8 @@
+         ASS_StringView member;
+ #define VECTOR(member) \
+         ASS_Vector member;
++#define RECT(member) \
++        ASS_Rect member;
+ #define END(typedefnamename) \
+     } typedefnamename;
+ 
+@@ -25,6 +27,10 @@
+             ass_string_equal(a->member, b->member) &&
+ #define VECTOR(member) \
+             a->member.x == b->member.x && a->member.y == b->member.y &&
++#define RECT(member) \
++            a->member.x_min == b->member.x_min && a->member.y_min == b->member.y_min && \
++            a->member.x_max == b->member.x_max && a->member.y_max == b->member.y_max &&
++
+ #define END(typedefname) \
+             true; \
+     }
+@@ -40,6 +46,9 @@
+ #define STRING(member) \
+         hval = ass_hash_buf(p->member.str, p->member.len, hval);
+ #define VECTOR(member) GENERIC(, member.x); GENERIC(, member.y);
++#define RECT(member) \
++        GENERIC(, member.x_min); GENERIC(, member.y_min); \
++        GENERIC(, member.x_max); GENERIC(, member.y_max);
+ #define END(typedefname) \
+         return hval; \
+     }
+@@ -66,6 +75,8 @@ START(bitmap, bitmap_hash_key)
+     VECTOR(matrix_x)
+     VECTOR(matrix_y)
+     VECTOR(matrix_z)
++    // clip region
++    RECT(clip)
+ END(BitmapHashKey)
+ 
+ // font is refed when inserted and unrefed when dropped
+@@ -135,4 +146,5 @@ END(BitmapRef)
+ #undef GENERIC
+ #undef STRING
+ #undef VECTOR
++#undef RECT
+ #undef END
+diff --git a/libass/ass_render.c b/libass/ass_render.c
+index 40c1933..457e92c 100644
+--- a/libass/ass_render.c
++++ b/libass/ass_render.c
+@@ -513,6 +513,7 @@ render_glyph(RenderContext *state, Bitmap *bm, int dst_x, int dst_y,
+ 
+ static bool quantize_transform(double m[3][3], ASS_Vector *pos,
+                                ASS_DVector *offset, bool first,
++                               ASS_Rect *clip,
+                                BitmapHashKey *key)
+ {
+     // Full transform:
+@@ -661,6 +662,33 @@ static bool quantize_transform(double m[3][3], ASS_Vector *pos,
+     key->matrix_x.x = qm[0][0];  key->matrix_x.y = qm[0][1];
+     key->matrix_y.x = qm[1][0];  key->matrix_y.y = qm[1][1];
+     key->matrix_z.x = qm[2][0];  key->matrix_z.y = qm[2][1];
++
++    if (clip && !(
++        ((qr[0] + key->outline->cbox.x_min) < (int64_t)((uint64_t)clip->x_min << SUBPIXEL_ORDER)) ||
++        ((qr[1] + key->outline->cbox.y_min) < (int64_t)((uint64_t)clip->y_min << SUBPIXEL_ORDER)) ||
++        ((qr[0] + key->outline->cbox.x_max) > (int64_t)((uint64_t)clip->x_max << SUBPIXEL_ORDER)) ||
++        ((qr[1] + key->outline->cbox.y_max) > (int64_t)((uint64_t)clip->y_max << SUBPIXEL_ORDER))
++    ))
++        clip = NULL;
++
++#define CLIP_PRECISION 64
++#define CLIP_PRECISION_MASK (~(CLIP_PRECISION - 1))
++#define CLIP_MIN(x) ((x) & CLIP_PRECISION_MASK)
++#define CLIP_MAX(x) (((x) + CLIP_PRECISION) & CLIP_PRECISION_MASK)
++    if (clip) {
++        key->clip = (ASS_Rect){
++            CLIP_MIN(clip->x_min - pos->x),
++            CLIP_MIN(clip->y_min - pos->y),
++            CLIP_MAX(clip->x_max - pos->x),
++            CLIP_MAX(clip->y_max - pos->y),
++        };
++    } else {
++        key->clip = (ASS_Rect){
++            INT32_MIN, INT32_MIN,
++            INT32_MAX, INT32_MAX,
++        };
++    }
++
+     return true;
+ }
+ 
+@@ -863,11 +891,18 @@ static void blend_vector_clip(RenderContext *state, ASS_Image *head)
+     m[0][2] = int_to_d6(render_priv->settings.left_margin);
+     m[1][2] = int_to_d6(render_priv->settings.top_margin);
+ 
++    ASS_Rect clip = (ASS_Rect){
++        0,
++        0,
++        render_priv->settings.frame_width,
++        render_priv->settings.frame_height,
++    };
++
+     ASS_Vector pos;
+     BitmapHashKey key;
+     key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
+     if (!key.outline || !key.outline->valid ||
+-            !quantize_transform(m, &pos, NULL, true, &key))
++            !quantize_transform(m, &pos, NULL, true, &clip, &key))
+         return;
+ 
+     Bitmap *clip_bm = ass_cache_get(render_priv->cache.bitmap_cache, &key, state);
+@@ -1551,6 +1586,8 @@ static void metrics_append_outline(RenderContext *state, ASS_Metrics_Outline **m
+     }
+ }
+ 
++int ass_be_padding(int be);
++
+ /**
+  * \brief Get bitmaps for a glyph
+  * \param info glyph info
+@@ -1583,9 +1620,62 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+     if (info->effect_type == EF_KARAOKE_KF)
+         ass_outline_update_min_transformed_x(&info->outline->outline[0], m, leftmost_x);
+ 
++    ASS_Rect clip_rect = {
++        0,
++        0,
++        render_priv->settings.frame_width,
++        render_priv->settings.frame_height,
++    };
++
++#ifdef USE_RECT_CLIP
++    if (!state->clip_mode) {
++        clip_rect = (ASS_Rect){
++            state->clip_x0,
++            state->clip_y0,
++            state->clip_x1,
++            state->clip_y1,
++        };
++    }
++#endif
++
++    bool potentially_clipped = (
++        info->pos.x + info->outline->cbox.x_min < clip_rect.x_min << SUBPIXEL_ORDER ||
++        info->pos.y + info->outline->cbox.y_min < clip_rect.y_min << SUBPIXEL_ORDER ||
++        info->pos.x + info->outline->cbox.x_max > clip_rect.x_max << SUBPIXEL_ORDER ||
++        info->pos.y + info->outline->cbox.y_max > clip_rect.y_max << SUBPIXEL_ORDER
++    );
++
++    if (potentially_clipped) {
++        double blur_radius_scale = 2 / sqrt(log(256));
++        double blur_scale_x = state->blur_scale_x * blur_radius_scale;
++        double blur_scale_y = state->blur_scale_y * blur_radius_scale;
++        double blur_x = info->blur * blur_scale_x;
++        double blur_y = info->blur * blur_scale_y;
++
++        uint32_t xpad = ass_blur_padding(blur_x) + ass_be_padding(info->be);
++        uint32_t ypad = ass_blur_padding(blur_y) + ass_be_padding(info->be);
++
++        clip_rect.x_min -= xpad;
++        clip_rect.y_min -= ypad;
++        clip_rect.x_max += xpad;
++        clip_rect.y_max += ypad;
++
++        int32_t shadow_x = double_to_d6(info->shadow_x * state->border_scale_x);
++        int32_t shadow_y = double_to_d6(info->shadow_y * state->border_scale_y);
++
++        if (shadow_x > 0)
++            clip_rect.x_min -= (shadow_x + 63) >> 6;
++        else
++            clip_rect.x_max -= (shadow_x - 63) >> 6;
++        if (shadow_y > 0)
++            clip_rect.y_min -= (shadow_y + 63) >> 6;
++        else
++            clip_rect.y_max -= (shadow_y - 63) >> 6;
++    }
++
+     BitmapHashKey key;
+     key.outline = info->outline;
+-    if (!quantize_transform(m, pos, offset, first, &key))
++    if (!quantize_transform(m, pos, offset, first, potentially_clipped ? &clip_rect : NULL, &key))
+         return;
+ 
+     if (state->collect_metrics) {
+@@ -1713,7 +1803,7 @@ get_bitmap_glyph(RenderContext *state, GlyphInfo *info,
+ 
+     key.outline = ass_cache_get(render_priv->cache.outline_cache, &ol_key, render_priv);
+     if (!key.outline || !key.outline->valid ||
+-            !quantize_transform(m, pos_o, offset, false, &key))
++            !quantize_transform(m, pos_o, offset, false, potentially_clipped ? &clip_rect : NULL, &key))
+         return;
+ 
+     if (state->collect_metrics) {
+@@ -1756,7 +1846,7 @@ size_t ass_bitmap_construct(void *key, void *value, void *priv)
+     ASS_Outline outline[2];
+     ass_outline_apply_transform(outline, k);
+ 
+-    if (!ass_outline_to_bitmap(state, bm, &outline[0], &outline[1]))
++    if (!ass_outline_to_bitmap(state, bm, &outline[0], &outline[1], &k->clip))
+         memset(bm, 0, sizeof(*bm));
+     ass_outline_free(&outline[0]);
+     ass_outline_free(&outline[1]);
