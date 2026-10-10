@@ -21,10 +21,10 @@ index 65fb59b5186c25806d0e78b93fa311909fd850c8..6befc1f4212fe52cf2e585e7fdfee0ff
      }
  #endif
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
-index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53bfacd82e 100644
+index eea8a90b765e262d1c5c688f9e858b97ca77e9da..6eaa0054bedf6452e5eede8b6dcc775ff0a19423 100644
 --- a/libass/c/c_blur_neon.c
 +++ b/libass/c/c_blur_neon.c
-@@ -353,9 +353,142 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
+@@ -353,9 +353,177 @@ void ass_expand_vert16_neon(int16_t *restrict dst,
      }
  }
  
@@ -96,10 +96,48 @@ index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53
 +    }
 +}
 +
-+static void blur_vert16_neon(int16_t *restrict dst,
-+                             const int16_t *restrict src,
-+                             size_t src_width, size_t src_height,
-+                             const int16_t *restrict param, int n)
++static inline int16x8_t blur_vert_edge_line_neon(
++    const int16_t *src, ptrdiff_t center_offs, size_t step,
++    const int16_t *param, int n)
++{
++    int16x8_t center = vld1q_s16(get_line(src, center_offs, step));
++    int32x4_t lo = vdupq_n_s32(0x8000);
++    int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++#pragma clang loop unroll(full)
++#endif
++    for (int i = n; i > 0; i--)
++        accumulate_param_pair(
++            &lo, &hi, center,
++            vld1q_s16(get_line(
++                src, center_offs - i * STRIPE_WIDTH, step)),
++            vld1q_s16(get_line(
++                src, center_offs + i * STRIPE_WIDTH, step)),
++            param[i - 1]);
++    return finish_param_blur(center, lo, hi);
++}
++
++static inline int16x8_t blur_vert_inner_line_neon(
++    const int16_t *center_ptr, const int16_t *param, int n)
++{
++    int16x8_t center = vld1q_s16(center_ptr);
++    int32x4_t lo = vdupq_n_s32(0x8000);
++    int32x4_t hi = vdupq_n_s32(0x8000);
++#if defined(__clang__)
++#pragma clang loop unroll(full)
++#endif
++    for (int i = n; i > 0; i--)
++        accumulate_param_pair(
++            &lo, &hi, center,
++            vld1q_s16(center_ptr - i * STRIPE_WIDTH),
++            vld1q_s16(center_ptr + i * STRIPE_WIDTH), param[i - 1]);
++    return finish_param_blur(center, lo, hi);
++}
++
++static inline __attribute__((always_inline)) void blur_vert16_neon(
++    int16_t *restrict dst, const int16_t *restrict src,
++    size_t src_width, size_t src_height,
++    const int16_t *restrict param, int n)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
@@ -109,30 +147,27 @@ index eea8a90b765e262d1c5c688f9e858b97ca77e9da..8a6e12d528267437edbfbd59f18d1b53
 +    size_t step = STRIPE_WIDTH * src_height;
 +
 +    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
-+        ptrdiff_t offs = 0;
-+        for (size_t y = 0; y < dst_height; y++) {
-+            ptrdiff_t center_offs = offs - n * STRIPE_WIDTH;
-+            int16x8_t center = vld1q_s16(
-+                get_line(src, center_offs, step));
-+            int32x4_t lo = vdupq_n_s32(0x8000);
-+            int32x4_t hi = vdupq_n_s32(0x8000);
-+#if defined(__clang__)
-+            // The radius-specific wrappers make this loop finite at compile
-+            // time and allow coefficient loads to be scheduled with the taps.
-+#pragma clang loop unroll(full)
-+#endif
-+            for (int i = n; i > 0; i--)
-+                accumulate_param_pair(
-+                    &lo, &hi, center,
-+                    vld1q_s16(get_line(
-+                        src, center_offs - i * STRIPE_WIDTH, step)),
-+                    vld1q_s16(get_line(
-+                        src, center_offs + i * STRIPE_WIDTH, step)),
-+                    param[i - 1]);
-+
-+            vst1q_s16(dst, finish_param_blur(center, lo, hi));
++        size_t y = 0;
++        for (; y < 2 * (size_t) n; y++) {
++            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
++            vst1q_s16(dst, blur_vert_edge_line_neon(
++                src, center_offs, step, param, n));
 +            dst += STRIPE_WIDTH;
-+            offs += STRIPE_WIDTH;
++        }
++
++        // From row 2n through the final source row, every kernel tap is
++        // inside this stripe and can bypass transparent-edge selection.
++        for (; y < src_height; y++) {
++            const int16_t *center = src + (y - n) * STRIPE_WIDTH;
++            vst1q_s16(dst, blur_vert_inner_line_neon(center, param, n));
++            dst += STRIPE_WIDTH;
++        }
++
++        for (; y < dst_height; y++) {
++            ptrdiff_t center_offs = ((ptrdiff_t) y - n) * STRIPE_WIDTH;
++            vst1q_s16(dst, blur_vert_edge_line_neon(
++                src, center_offs, step, param, n));
++            dst += STRIPE_WIDTH;
 +        }
 +        src += step;
 +    }
