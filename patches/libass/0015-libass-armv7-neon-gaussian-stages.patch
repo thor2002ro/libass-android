@@ -39,7 +39,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f136556238
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,285 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -115,9 +115,16 @@ index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f1
 +    *rn = vrhaddq_u16(vhaddq_u16(value, n1), z0);
 +}
 +
++static inline uint8x8_t pack8_neon(const int16_t *src, uint16x8_t dither)
++{
++    uint16x8_t value = vreinterpretq_u16_s16(vld1q_s16(src));
++    value = vsubq_u16(value, vshrq_n_u16(value, 8));
++    return vshrn_n_u16(vaddq_u16(value, dither), 6);
++}
++
 +void ass_stripe_pack16_neon(uint8_t *restrict dst, ptrdiff_t dst_stride,
-+                             const int16_t *restrict src,
-+                             size_t width, size_t height)
++                            const int16_t *restrict src,
++                            size_t width, size_t height)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT) && !(dst_stride % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
@@ -127,17 +134,25 @@ index 0000000000000000000000000000000000000000..3d24ef53cb7147a4b5a88a914049a7f1
 +        {  8, 40,  8, 40,  8, 40,  8, 40 },
 +        { 56, 24, 56, 24, 56, 24, 56, 24 },
 +    };
++    uint16x8_t dither0 = vld1q_u16(dither[0]);
++    uint16x8_t dither1 = vld1q_u16(dither[1]);
 +
 +    // The intermediate bitmap stores one vertical eight-pixel stripe at a
 +    // time, so advancing src walks down a stripe rather than across a row.
 +    for (size_t x = 0; x < width; x += STRIPE_WIDTH) {
 +        uint8_t *ptr = dst;
-+        for (size_t y = 0; y < height; y++) {
-+            uint16x8_t value = vreinterpretq_u16_s16(vld1q_s16(src));
-+            value = vsubq_u16(value, vshrq_n_u16(value, 8));
-+            value = vaddq_u16(value, vld1q_u16(dither[y & 1]));
-+            vst1_u8(ptr, vshrn_n_u16(value, 6));
-+            ptr += dst_stride;
++        size_t y = 0;
++        // Pack a dither pair together to reuse both constants and reduce the
++        // loop-control work on the common multi-row path.
++        for (; y + 1 < height; y += 2) {
++            vst1_u8(ptr, pack8_neon(src, dither0));
++            vst1_u8(ptr + dst_stride,
++                    pack8_neon(src + STRIPE_WIDTH, dither1));
++            ptr += 2 * dst_stride;
++            src += 2 * STRIPE_WIDTH;
++        }
++        if (y < height) {
++            vst1_u8(ptr, pack8_neon(src, dither0));
 +            src += STRIPE_WIDTH;
 +        }
 +        dst += STRIPE_WIDTH;
