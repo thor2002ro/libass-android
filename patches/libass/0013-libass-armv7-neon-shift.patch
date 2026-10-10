@@ -51,7 +51,7 @@ index 166267e..2a0a033 100644
  
  #define ALIGNMENT  16
  
-@@ -56,3 +60,76 @@ void ass_shift_c(uint8_t *restrict buf, ptrdiff_t stride,
+@@ -56,3 +60,80 @@ void ass_shift_c(uint8_t *restrict buf, ptrdiff_t stride,
      int16_t tmp1 = 64 * buf[width - 1] - buf[width - 1] * (int16_t) shift_x;
      buf[width - 1] = (int16_t) (tmp1 - (int16_t) ((int16_t) (2 * tmp1) * (int32_t) sy >> 16) + 32) >> 6;
  }
@@ -106,6 +106,9 @@ index 166267e..2a0a033 100644
 +            int16x8_t lower = shift_x_neon(next + x, sx);
 +            vst1_u8(buf + x, shift_y_neon(upper, lower, sy));
 +        }
++        // The NEON loop leaves at most seven pixels. Keep this tail scalar to
++        // avoid generating a second vector loop for the short remainder.
++#pragma clang loop vectorize(disable)
 +        for (; x + 1 < width; x++) {
 +            buf[x] = shift_pixel(
 +                buf[x], buf[x + 1], next[x], next[x + 1], sx, sy
@@ -123,6 +126,7 @@ index 166267e..2a0a033 100644
 +        int16x8_t upper = shift_x_neon(buf + x, sx);
 +        vst1_u8(buf + x, shift_y_neon(upper, zero, sy));
 +    }
++#pragma clang loop vectorize(disable)
 +    for (; x + 1 < width; x++)
 +        buf[x] = shift_pixel(buf[x], buf[x + 1], 0, 0, sx, sy);
 +    buf[width - 1] = shift_pixel(buf[width - 1], 0, 0, 0, sx, sy);
