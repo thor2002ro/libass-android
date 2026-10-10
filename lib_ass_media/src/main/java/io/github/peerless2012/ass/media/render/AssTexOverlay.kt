@@ -66,7 +66,7 @@ class AssTexOverlay(
         }
 
         val layout = AssAtlasSurfaceLayout.resolve(
-            activeBounds = frame.activeBounds,
+            frame = frame,
             renderSize = renderSize,
             videoSize = videoSize,
             previousCapacity = textureSize,

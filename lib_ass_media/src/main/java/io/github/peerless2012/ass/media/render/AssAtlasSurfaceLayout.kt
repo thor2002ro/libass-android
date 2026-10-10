@@ -1,7 +1,11 @@
 package io.github.peerless2012.ass.media.render
 
+import androidx.annotation.OptIn
 import androidx.media3.common.util.Size
+import androidx.media3.common.util.UnstableApi
+import io.github.peerless2012.ass.AssAtlasFrame
 
+@OptIn(UnstableApi::class)
 internal object AssAtlasSurfaceLayout {
     data class SurfaceLayout(
         val capacity: Size,
@@ -13,40 +17,77 @@ internal object AssAtlasSurfaceLayout {
     )
 
     fun resolve(
+        frame: AssAtlasFrame,
+        renderSize: Size,
+        videoSize: Size,
+        previousCapacity: Size,
+    ): SurfaceLayout = if (frame.hasActiveBounds) {
+        resolve(
+            left = frame.activeBound(0),
+            top = frame.activeBound(1),
+            width = frame.activeBound(2),
+            height = frame.activeBound(3),
+            renderSize = renderSize,
+            videoSize = videoSize,
+            previousCapacity = previousCapacity,
+        )
+    } else {
+        emptyLayout(renderSize, videoSize)
+    }
+
+    fun resolve(
         activeBounds: IntArray,
         renderSize: Size,
         videoSize: Size,
         previousCapacity: Size,
     ): SurfaceLayout {
-        if (activeBounds.size != 4 || renderSize.width <= 0 || renderSize.height <= 0 ||
-            activeBounds[2] <= 0 || activeBounds[3] <= 0
+        if (activeBounds.size != 4) return emptyLayout(renderSize, videoSize)
+        return resolve(
+            left = activeBounds[0],
+            top = activeBounds[1],
+            width = activeBounds[2],
+            height = activeBounds[3],
+            renderSize = renderSize,
+            videoSize = videoSize,
+            previousCapacity = previousCapacity,
+        )
+    }
+
+    private fun resolve(
+        left: Int,
+        top: Int,
+        width: Int,
+        height: Int,
+        renderSize: Size,
+        videoSize: Size,
+        previousCapacity: Size,
+    ): SurfaceLayout {
+        if (renderSize.width <= 0 || renderSize.height <= 0 || width <= 0 || height <= 0
         ) return emptyLayout(renderSize, videoSize)
 
-        val left = activeBounds[0].coerceIn(0, renderSize.width)
-        val top = activeBounds[1].coerceIn(0, renderSize.height)
-        val right = (activeBounds[0].toLong() + activeBounds[2])
-            .coerceIn(left.toLong(), renderSize.width.toLong()).toInt()
-        val bottom = (activeBounds[1].toLong() + activeBounds[3])
-            .coerceIn(top.toLong(), renderSize.height.toLong()).toInt()
-        val width = right - left
-        val height = bottom - top
-        if (width <= 0 || height <= 0) return emptyLayout(renderSize, videoSize)
+        val boundedLeft = left.coerceIn(0, renderSize.width)
+        val boundedTop = top.coerceIn(0, renderSize.height)
+        val right = (left.toLong() + width).coerceIn(boundedLeft.toLong(), renderSize.width.toLong()).toInt()
+        val bottom = (top.toLong() + height).coerceIn(boundedTop.toLong(), renderSize.height.toLong()).toInt()
+        val boundedWidth = right - boundedLeft
+        val boundedHeight = bottom - boundedTop
+        if (boundedWidth <= 0 || boundedHeight <= 0) return emptyLayout(renderSize, videoSize)
 
-        val maxWidth = renderSize.width - left
-        val maxHeight = renderSize.height - top
-        val reuse = previousCapacity.width >= width && previousCapacity.height >= height &&
+        val maxWidth = renderSize.width - boundedLeft
+        val maxHeight = renderSize.height - boundedTop
+        val reuse = previousCapacity.width >= boundedWidth && previousCapacity.height >= boundedHeight &&
             previousCapacity.width <= maxWidth && previousCapacity.height <= maxHeight
         val capacity = if (reuse) previousCapacity else Size(
-            roundUp(width, BUCKET_SIZE).coerceAtMost(maxWidth),
-            roundUp(height, BUCKET_SIZE).coerceAtMost(maxHeight),
+            roundUp(boundedWidth, BUCKET_SIZE).coerceAtMost(maxWidth),
+            roundUp(boundedHeight, BUCKET_SIZE).coerceAtMost(maxHeight),
         )
         return SurfaceLayout(
             capacity = capacity,
-            originX = left,
-            originY = top,
-            activeWidth = width,
-            activeHeight = height,
-            vertexTransform = placementTransform(left, top, capacity, renderSize, videoSize),
+            originX = boundedLeft,
+            originY = boundedTop,
+            activeWidth = boundedWidth,
+            activeHeight = boundedHeight,
+            vertexTransform = placementTransform(boundedLeft, boundedTop, capacity, renderSize, videoSize),
         )
     }
 

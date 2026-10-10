@@ -237,14 +237,12 @@ internal class AssPerformanceStatsRecorder(
             }
             nativeCopiedMaskBytes += frame.copiedMaskBytes.coerceAtLeast(0L)
         }
-        val quads = frame?.quads ?: return
-        var offset = 0
-        repeat(imageCount) {
+        frame ?: return
+        repeat(imageCount) { image ->
             recordImagePixels(
-                quads[offset + AssAtlasFrame.QUAD_WIDTH].toLong() *
-                    quads[offset + AssAtlasFrame.QUAD_HEIGHT]
+                frame.quadValue(image, AssAtlasFrame.QUAD_WIDTH).toLong() *
+                    frame.quadValue(image, AssAtlasFrame.QUAD_HEIGHT)
             )
-            offset += AssAtlasFrame.QUAD_STRIDE
         }
     }
 
@@ -290,13 +288,14 @@ internal class AssPerformanceStatsRecorder(
     }
 
     private fun recordAtlasUploads(frame: AssAtlasFrame?) {
-        val pages = frame?.pages ?: return
-        val pageCount = minOf(pages.size, frame.pageWidths.size, frame.pageHeights.size)
+        frame ?: return
+        if (frame.changed != AssAtlasFrame.CHANGE_REPLACE) return
+        val pageCount = frame.pageCount
         if (pageCount <= 0) return
         atlasUploadPageCount += pageCount
         maxAtlasUploadPageCount = maxOf(maxAtlasUploadPageCount, pageCount)
         repeat(pageCount) { page ->
-            recordAtlasUploadPagePixels(frame.pageWidths[page].toLong() * frame.pageHeights[page])
+            recordAtlasUploadPagePixels(frame.pageWidth(page).toLong() * frame.pageHeight(page))
         }
     }
 

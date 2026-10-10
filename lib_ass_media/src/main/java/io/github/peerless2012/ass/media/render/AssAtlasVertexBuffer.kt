@@ -30,25 +30,21 @@ internal class AssAtlasVertexBuffer {
 
     fun isValid(frame: AssAtlasFrame, sourceWidth: Int, sourceHeight: Int): Boolean {
         if (sourceWidth <= 0 || sourceHeight <= 0) return false
-        if (frame.quads.size % AssAtlasFrame.QUAD_STRIDE != 0) return false
-        if (frame.pageWidths.size != frame.pageHeights.size) return false
         val imageCount = frame.imageCount
         if (imageCount > MAX_QUADS) return false
         val requiredVertexBytes = imageCount.toLong() * VERTICES_PER_QUAD * VERTEX_STRIDE_BYTES
         val requiredIndexBytes = imageCount.toLong() * INDICES_PER_QUAD * BYTES_PER_INDEX
         if (requiredVertexBytes > Int.MAX_VALUE || requiredIndexBytes > Int.MAX_VALUE) return false
 
-        var quadOffset = 0
-        repeat(imageCount) {
-            val width = frame.quads[quadOffset + AssAtlasFrame.QUAD_WIDTH]
-            val height = frame.quads[quadOffset + AssAtlasFrame.QUAD_HEIGHT]
-            val page = frame.quads[quadOffset + AssAtlasFrame.QUAD_PAGE]
-            val atlasX = frame.quads[quadOffset + AssAtlasFrame.QUAD_ATLAS_X]
-            val atlasY = frame.quads[quadOffset + AssAtlasFrame.QUAD_ATLAS_Y]
-            quadOffset += AssAtlasFrame.QUAD_STRIDE
-            if (width <= 0 || height <= 0 || page !in frame.pageWidths.indices) return false
-            val pageWidth = frame.pageWidths[page]
-            val pageHeight = frame.pageHeights[page]
+        repeat(imageCount) { image ->
+            val width = frame.quadValue(image, AssAtlasFrame.QUAD_WIDTH)
+            val height = frame.quadValue(image, AssAtlasFrame.QUAD_HEIGHT)
+            val page = frame.quadValue(image, AssAtlasFrame.QUAD_PAGE)
+            val atlasX = frame.quadValue(image, AssAtlasFrame.QUAD_ATLAS_X)
+            val atlasY = frame.quadValue(image, AssAtlasFrame.QUAD_ATLAS_Y)
+            if (width <= 0 || height <= 0 || page !in 0 until frame.pageCount) return false
+            val pageWidth = frame.pageWidth(page)
+            val pageHeight = frame.pageHeight(page)
             if (pageWidth <= 0 || pageHeight <= 0) return false
             if (atlasX < 0 || atlasY < 0 ||
                 atlasX.toLong() + width > pageWidth ||
@@ -79,20 +75,18 @@ internal class AssAtlasVertexBuffer {
         runCount = 0
         var currentRunPage = -1
 
-        var quadOffset = 0
-        repeat(imageCount) {
-            val x = frame.quads[quadOffset + AssAtlasFrame.QUAD_DST_X]
-            val y = frame.quads[quadOffset + AssAtlasFrame.QUAD_DST_Y]
-            val width = frame.quads[quadOffset + AssAtlasFrame.QUAD_WIDTH]
-            val height = frame.quads[quadOffset + AssAtlasFrame.QUAD_HEIGHT]
-            val color = frame.quads[quadOffset + AssAtlasFrame.QUAD_COLOR]
-            val page = frame.quads[quadOffset + AssAtlasFrame.QUAD_PAGE]
-            val atlasX = frame.quads[quadOffset + AssAtlasFrame.QUAD_ATLAS_X]
-            val atlasY = frame.quads[quadOffset + AssAtlasFrame.QUAD_ATLAS_Y]
-            quadOffset += AssAtlasFrame.QUAD_STRIDE
+        repeat(imageCount) { image ->
+            val x = frame.quadValue(image, AssAtlasFrame.QUAD_DST_X)
+            val y = frame.quadValue(image, AssAtlasFrame.QUAD_DST_Y)
+            val width = frame.quadValue(image, AssAtlasFrame.QUAD_WIDTH)
+            val height = frame.quadValue(image, AssAtlasFrame.QUAD_HEIGHT)
+            val color = frame.quadValue(image, AssAtlasFrame.QUAD_COLOR)
+            val page = frame.quadValue(image, AssAtlasFrame.QUAD_PAGE)
+            val atlasX = frame.quadValue(image, AssAtlasFrame.QUAD_ATLAS_X)
+            val atlasY = frame.quadValue(image, AssAtlasFrame.QUAD_ATLAS_Y)
 
-            val pageWidth = frame.pageWidths[page]
-            val pageHeight = frame.pageHeights[page]
+            val pageWidth = frame.pageWidth(page)
+            val pageHeight = frame.pageHeight(page)
             if (page != currentRunPage) {
                 currentRunPage = page
                 runPages[runCount] = page
