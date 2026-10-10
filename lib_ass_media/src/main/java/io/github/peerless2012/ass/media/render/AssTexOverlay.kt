@@ -1,7 +1,6 @@
 package io.github.peerless2012.ass.media.render
 
 import android.opengl.GLES20
-import android.opengl.Matrix
 import androidx.annotation.OptIn
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
@@ -35,6 +34,7 @@ class AssTexOverlay(
 
     private var textureSize = Size.ZERO
     private var renderSize = Size.ZERO
+    private var videoSize = Size.ZERO
     private var vertexTransformMatrix = GlUtil.create4x4IdentityMatrix()
 
     private var atlasRenderer: AssAtlasGlRenderer? = null
@@ -47,6 +47,8 @@ class AssTexOverlay(
         handler.config.maxSubtitleFps,
     )
     private var configured = false
+    @Volatile
+    private var forceReplacement = false
 
     override fun getTextureId(presentationTimeUs: Long): Int {
         if (!configured) return outputTextureId
@@ -58,6 +60,18 @@ class AssTexOverlay(
         if (frame == null || frame.changed == AssAtlasFrame.CHANGE_NONE) {
             return outputTextureId
         }
+        if (!currentAtlasRenderer.isFrameCompatible(frame, renderSize.width, renderSize.height)) {
+            forceReplacement = true
+            return outputTextureId
+        }
+
+        val layout = AssAtlasSurfaceLayout.resolve(
+            activeBounds = frame.activeBounds,
+            renderSize = renderSize,
+            videoSize = videoSize,
+            previousCapacity = textureSize,
+        )
+        ensureSurfaceCapacity(layout.capacity)
 
         val state = GlStateSnapshot.capture()
         try {
@@ -67,15 +81,21 @@ class AssTexOverlay(
                 frame = frame,
                 sourceWidth = renderSize.width,
                 sourceHeight = renderSize.height,
-                targetWidth = renderSize.width,
-                targetHeight = renderSize.height,
+                targetWidth = layout.capacity.width,
+                targetHeight = layout.capacity.height,
+                originX = layout.originX,
+                originY = layout.originY,
             )
             if (result == AssAtlasGlRenderer.DrawResult.UNCHANGED) {
                 return outputTextureId
             }
+            if (result == AssAtlasGlRenderer.DrawResult.NEEDS_REPLACEMENT) {
+                forceReplacement = true
+                return outputTextureId
+            }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFboId)
-            GLES20.glViewport(0, 0, renderSize.width, renderSize.height)
+            GLES20.glViewport(0, 0, layout.capacity.width, layout.capacity.height)
             GLES20.glDisable(GLES20.GL_BLEND)
             GLES20.glClearColor(0f, 0f, 0f, 0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -83,6 +103,15 @@ class AssTexOverlay(
                 drawUnpremultiplyPass()
             }
             GlUtil.checkGlError()
+            textureSize = layout.capacity
+            vertexTransformMatrix = layout.vertexTransform
+            if (frame.changed == AssAtlasFrame.CHANGE_REPLACE) forceReplacement = false
+            handler.config.performanceStatsCollector?.recordGlUpload(
+                uploadedBytes = 0L,
+                submissionDurationNs = 0L,
+                activeSurfacePixels = layout.activeWidth.toLong() * layout.activeHeight,
+                allocatedSurfacePixels = layout.capacity.width.toLong() * layout.capacity.height,
+            )
         } finally {
             state.restore()
         }
@@ -97,13 +126,13 @@ class AssTexOverlay(
     override fun configure(videoSize: Size) {
         super.configure(videoSize)
         if (configured) releaseGlResources()
+        this.videoSize = videoSize
 
         val maxTextureSize = queryMaxTextureSize()
         renderSize = fitWithinTextureLimit(
             handler.computeRenderSize(videoSize.width, videoSize.height),
             maxTextureSize,
         )
-        textureSize = renderSize
         render.setFrameSize(renderSize.width, renderSize.height)
 
         val configuredAtlasLimit = handler.config.maxAtlasTextureSize
@@ -114,16 +143,21 @@ class AssTexOverlay(
         }
 
         try {
-            outputTextureId = GlUtil.createTexture(renderSize.width, renderSize.height, false)
-            outputFboId = GlUtil.createFboForTexture(outputTextureId)
-            premultipliedTextureId = GlUtil.createTexture(renderSize.width, renderSize.height, false)
-            premultipliedFboId = GlUtil.createFboForTexture(premultipliedTextureId)
+            ensureSurfaceCapacity(Size(2, 2))
 
-            atlasRenderer = AssAtlasGlRenderer(handler.config.performanceStatsCollector).also {
+            val renderer = AssAtlasGlRenderer(handler.config.performanceStatsCollector).also {
                 it.initialize()
             }
+            atlasRenderer = renderer
             executor = AssAtlasExecutor(
-                frameRenderer = { timeMs -> handler.renderAtlasFrame(timeMs, maxAtlasSize) },
+                frameRenderer = { timeMs ->
+                    handler.renderAtlasFrame(
+                        timeMs,
+                        maxAtlasSize,
+                        renderer.supportsIncrementalUpdates,
+                        forceReplacement,
+                    )
+                },
                 statsCollector = handler.config.performanceStatsCollector,
             )
             unpremultiplyProgram = GlProgram(
@@ -142,16 +176,12 @@ class AssTexOverlay(
             fullscreenBufferId = createFullscreenBuffer()
             renderClock.reset()
 
-            vertexTransformMatrix = GlUtil.create4x4IdentityMatrix()
-            if (renderSize.width != videoSize.width || renderSize.height != videoSize.height) {
-                Matrix.scaleM(
-                    vertexTransformMatrix,
-                    0,
-                    videoSize.width.toFloat() / renderSize.width,
-                    videoSize.height.toFloat() / renderSize.height,
-                    1f,
-                )
-            }
+            vertexTransformMatrix = AssAtlasSurfaceLayout.resolve(
+                IntArray(0),
+                renderSize,
+                videoSize,
+                Size.ZERO,
+            ).vertexTransform
 
             clearTexture(outputFboId)
             clearTexture(premultipliedFboId)
@@ -239,12 +269,27 @@ class AssTexOverlay(
         try {
             prepareOffscreenDrawState()
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, renderSize.width, renderSize.height)
+            GLES20.glViewport(0, 0, textureSize.width, textureSize.height)
             GLES20.glClearColor(0f, 0f, 0f, 0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         } finally {
             state.restore()
         }
+    }
+
+    private fun ensureSurfaceCapacity(required: Size) {
+        if (textureSize == required && outputTextureId != 0 && premultipliedTextureId != 0) return
+        if (outputFboId != 0) GlUtil.deleteFbo(outputFboId)
+        if (premultipliedFboId != 0) GlUtil.deleteFbo(premultipliedFboId)
+        if (outputTextureId != 0) GlUtil.deleteTexture(outputTextureId)
+        if (premultipliedTextureId != 0) GlUtil.deleteTexture(premultipliedTextureId)
+        outputTextureId = GlUtil.createTexture(required.width, required.height, false)
+        outputFboId = GlUtil.createFboForTexture(outputTextureId)
+        premultipliedTextureId = GlUtil.createTexture(required.width, required.height, false)
+        premultipliedFboId = GlUtil.createFboForTexture(premultipliedTextureId)
+        textureSize = required
+        clearTexture(outputFboId)
+        clearTexture(premultipliedFboId)
     }
 
     private fun prepareOffscreenDrawState() {
@@ -283,7 +328,9 @@ class AssTexOverlay(
         fullscreenBufferId = 0
         textureSize = Size.ZERO
         renderSize = Size.ZERO
+        videoSize = Size.ZERO
         vertexTransformMatrix = GlUtil.create4x4IdentityMatrix()
+        forceReplacement = false
         renderClock.reset()
         configured = false
     }

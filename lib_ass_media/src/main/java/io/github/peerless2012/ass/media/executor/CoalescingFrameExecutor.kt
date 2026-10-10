@@ -1,11 +1,11 @@
 package io.github.peerless2012.ass.media.executor
 
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Single-worker, latest-request-only scheduler.
@@ -26,7 +26,7 @@ internal class CoalescingFrameExecutor<P, T>(
         Thread(runnable, threadName).apply { isDaemon = true }
     }
     private val stateLock = Any()
-    private val completedSyncFrame = AtomicReference<SyncCompletion<T>?>(null)
+    private val syncHandoff = SyncHandoff<T>()
 
     // Guarded by stateLock.
     private var pendingRequest: RenderRequest? = null
@@ -34,16 +34,17 @@ internal class CoalescingFrameExecutor<P, T>(
     private var workerScheduled = false
     private var shutdownRequested = false
 
+    @Synchronized
     fun renderFrame(presentationTimeUs: Long, parameter: P): T? {
         // A render that exceeded the previous call's deadline is still useful
         // on the next video frame.
         val deferredFrame = consumeDeferredFrame(presentationTimeUs)
-        val completion = SyncCompletion<T>(presentationTimeUs)
+        val generation = syncHandoff.begin(presentationTimeUs)
         enqueue(
             RenderRequest(
                 presentationTimeUs = presentationTimeUs,
                 parameter = parameter,
-                syncCompletion = completion,
+                syncGeneration = generation,
             )
         )
 
@@ -53,14 +54,13 @@ internal class CoalescingFrameExecutor<P, T>(
 
         var timedOut = false
         try {
-            if (completion.await(renderWaitTimeoutMs, TimeUnit.MILLISECONDS)) {
-                consumeDeferredFrame(presentationTimeUs, except = completion)?.let { deferredCompletion ->
-                    completedSyncFrame.compareAndSet(null, completion)
-                    return deferredCompletion.frame
-                }
-                if (!completion.tryConsume()) return unchangedFrame
-                completedSyncFrame.compareAndSet(completion, null)
-                return completion.frame
+            if (syncHandoff.await(generation, renderWaitTimeoutMs, TimeUnit.MILLISECONDS)) {
+                // A request that missed the previous deadline may finish just
+                // before this one. Publish that older usable frame first so a
+                // fast current render cannot skip it.
+                consumeDeferredFrame(presentationTimeUs, generation)?.let { return it.frame }
+                syncHandoff.take(generation)?.let { return it.frame }
+                return unchangedFrame
             } else {
                 timedOut = true
             }
@@ -71,10 +71,7 @@ internal class CoalescingFrameExecutor<P, T>(
         if (timedOut) onTimeout()
 
         // Cover completion on the timeout boundary.
-        if (completion.isComplete && completion.tryConsume()) {
-            completedSyncFrame.compareAndSet(completion, null)
-            return completion.frame
-        }
+        syncHandoff.take(generation)?.let { return it.frame }
 
         consumeDeferredFrame(presentationTimeUs)?.let { return it.frame }
         return unchangedFrame
@@ -103,7 +100,7 @@ internal class CoalescingFrameExecutor<P, T>(
             }
         }
 
-        completedSyncFrame.set(null)
+        syncHandoff.clear()
         requestsToCancel.forEach { request ->
             request.complete(unchangedFrame, publishSyncResult = false)
         }
@@ -184,25 +181,13 @@ internal class CoalescingFrameExecutor<P, T>(
 
     private fun consumeDeferredFrame(
         requestedTimeUs: Long,
-        except: SyncCompletion<T>? = null,
-    ): SyncCompletion<T>? {
-        while (true) {
-            val completion = completedSyncFrame.get() ?: return null
-            if (completion === except) return null
-            if (!completedSyncFrame.compareAndSet(completion, null)) continue
-            // Never display a frame from the future after a backward seek.
-            if (completion.presentationTimeUs > requestedTimeUs) {
-                completion.tryConsume()
-                continue
-            }
-            if (completion.tryConsume()) return completion
-        }
-    }
+        except: Long? = null,
+    ): SyncResult<T>? = syncHandoff.takeDeferred(requestedTimeUs, except)
 
     private inner class RenderRequest(
         val presentationTimeUs: Long,
         val parameter: P,
-        val syncCompletion: SyncCompletion<T>? = null,
+        val syncGeneration: Long? = null,
         val callback: ((T?) -> Unit)? = null,
     ) {
         private val completed = AtomicBoolean(false)
@@ -210,12 +195,8 @@ internal class CoalescingFrameExecutor<P, T>(
         fun complete(frame: T?, publishSyncResult: Boolean) {
             if (!completed.compareAndSet(false, true)) return
 
-            syncCompletion?.let { completion ->
-                completion.setFrame(frame)
-                if (publishSyncResult) {
-                    completedSyncFrame.compareAndSet(null, completion)
-                }
-                completion.signal()
+            syncGeneration?.let { generation ->
+                syncHandoff.complete(generation, presentationTimeUs, frame, publishSyncResult)
             }
 
             callback?.let { renderCallback ->
@@ -228,27 +209,77 @@ internal class CoalescingFrameExecutor<P, T>(
         }
     }
 
-    private class SyncCompletion<T>(
-        val presentationTimeUs: Long,
-    ) {
-        private val latch = CountDownLatch(1)
-        private val consumed = AtomicBoolean(false)
+    private data class SyncResult<T>(val frame: T?)
 
-        @Volatile
-        var frame: T? = null
-            private set
+    private class SyncHandoff<T> {
+        private val lock = ReentrantLock()
+        private val completed = lock.newCondition()
+        private var nextGeneration = 0L
+        private var currentGeneration = 0L
+        private var currentTimeUs = 0L
+        private var currentFrame: T? = null
+        private var currentComplete = false
+        private var currentConsumed = true
+        private var deferredGeneration = 0L
+        private var deferredTimeUs = 0L
+        private var deferredFrame: T? = null
+        private var deferredAvailable = false
 
-        val isComplete: Boolean
-            get() = latch.count == 0L
-
-        fun setFrame(frame: T?) {
-            this.frame = frame
+        fun begin(presentationTimeUs: Long): Long = lock.withLock {
+            currentGeneration = ++nextGeneration
+            currentTimeUs = presentationTimeUs
+            currentFrame = null
+            currentComplete = false
+            currentConsumed = false
+            currentGeneration
         }
 
-        fun signal() = latch.countDown()
+        fun complete(generation: Long, presentationTimeUs: Long, frame: T?, publish: Boolean) =
+            lock.withLock {
+                if (generation == currentGeneration) {
+                    currentFrame = frame
+                    currentComplete = true
+                } else if (publish && generation < currentGeneration &&
+                    (!deferredAvailable || generation > deferredGeneration)
+                ) {
+                    deferredGeneration = generation
+                    deferredTimeUs = presentationTimeUs
+                    deferredFrame = frame
+                    deferredAvailable = true
+                }
+                completed.signalAll()
+            }
 
-        fun await(timeout: Long, unit: TimeUnit): Boolean = latch.await(timeout, unit)
+        fun await(generation: Long, timeout: Long, unit: TimeUnit): Boolean = lock.withLock {
+            var remainingNs = unit.toNanos(timeout)
+            while (generation == currentGeneration && !currentComplete && remainingNs > 0L) {
+                remainingNs = completed.awaitNanos(remainingNs)
+            }
+            generation == currentGeneration && currentComplete
+        }
 
-        fun tryConsume(): Boolean = consumed.compareAndSet(false, true)
+        fun take(generation: Long): SyncResult<T>? = lock.withLock {
+            if (generation != currentGeneration || !currentComplete || currentConsumed) return null
+            currentConsumed = true
+            SyncResult(currentFrame)
+        }
+
+        fun takeDeferred(requestedTimeUs: Long, except: Long?): SyncResult<T>? = lock.withLock {
+            if (currentComplete && !currentConsumed && currentGeneration != except) {
+                currentConsumed = true
+                if (currentTimeUs <= requestedTimeUs) return SyncResult(currentFrame)
+            }
+            if (deferredAvailable && deferredGeneration != except) {
+                deferredAvailable = false
+                if (deferredTimeUs <= requestedTimeUs) return SyncResult(deferredFrame)
+            }
+            null
+        }
+
+        fun clear() = lock.withLock {
+            currentConsumed = true
+            deferredAvailable = false
+            completed.signalAll()
+        }
     }
 }
