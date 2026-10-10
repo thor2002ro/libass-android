@@ -1540,6 +1540,19 @@ static void nativeAssRenderSetCacheLimit(
     if (renderer != NULL) ass_set_cache_limits(renderer, glyph_max, bitmap_max_size);
 }
 
+static jint nativeAssRenderSetThreads(
+    JNIEnv *env,
+    jclass clazz,
+    jlong render,
+    jint threads
+) {
+    (void) env;
+    (void) clazz;
+    ASS_Renderer *renderer = ass_renderer(render);
+    if (renderer == NULL || threads <= 0) return 0;
+    return (jint) ass_set_threads(renderer, (unsigned) threads);
+}
+
 static void nativeAssRenderSetFrameSize(
     JNIEnv *env,
     jclass clazz,
@@ -1596,6 +1609,7 @@ static JNINativeMethod render_method_table[] = {
     {"nativeAssRenderInit", "(J)J", (void *) nativeAssRenderInit},
     {"nativeAssRenderSetFontScale", "(JF)V", (void *) nativeAssRenderSetFontScale},
     {"nativeAssRenderSetCacheLimit", "(JII)V", (void *) nativeAssRenderSetCacheLimit},
+    {"nativeAssRenderSetThreads", "(JI)I", (void *) nativeAssRenderSetThreads},
     {"nativeAssRenderSetStorageSize", "(JII)V", (void *) nativeAssRenderSetStorageSize},
     {"nativeAssRenderSetFrameSize", "(JII)V", (void *) nativeAssRenderSetFrameSize},
     {"nativeAssRenderSetPixelAspect", "(JD)V", (void *) nativeAssRenderSetPixelAspect},
