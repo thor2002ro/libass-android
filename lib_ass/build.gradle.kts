@@ -128,8 +128,7 @@ android {
     ndkVersion = providers.gradleProperty("androidNdkVersion").get()
 
     defaultConfig {
-        minSdk = 23
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        minSdk = 21
         consumerProguardFiles("consumer-rules.pro")
         externalNativeBuild {
             cmake {
@@ -182,10 +181,4 @@ android {
             headers = libassPrefabHeadersDir.get().asFile.absolutePath
         }
     }
-}
-
-dependencies {
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
 }
