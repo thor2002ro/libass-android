@@ -1,0 +1,83 @@
+diff --git a/libass/c/blur_template.h b/libass/c/blur_template.h
+index 921b62de1..87680ccb9 100644
+--- a/libass/c/blur_template.h
++++ b/libass/c/blur_template.h
+@@ -19,7 +19,7 @@
+ #define STRIPE_WIDTH  (ALIGNMENT / 2)
+ #define STRIPE_MASK   (STRIPE_WIDTH - 1)
+ 
+-inline static void SUFFIX(copy_line)(int16_t *buf, const int16_t *ptr, size_t offs, size_t size)
++inline static void SUFFIX(copy_line)(int16_t *buf, const int16_t *ptr, ptrdiff_t offs, size_t size)
+ {
+     memcpy(buf, get_line(ptr, offs, size), STRIPE_WIDTH * sizeof(buf[0]));
+ }
+@@ -86,7 +86,7 @@ void SUFFIX(ass_shrink_horz)(int16_t *dst, const int16_t *src,
+     size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
+     size_t step = STRIPE_WIDTH * src_height;
+ 
+-    size_t offs = 0;
++    ptrdiff_t offs = 0;
+     int16_t buf[3 * STRIPE_WIDTH];
+     int16_t *ptr = buf + STRIPE_WIDTH;
+     for (size_t x = 0; x < dst_width; x += STRIPE_WIDTH) {
+@@ -112,7 +112,7 @@ void SUFFIX(ass_shrink_vert)(int16_t *dst, const int16_t *src,
+     size_t step = STRIPE_WIDTH * src_height;
+ 
+     for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
+-        size_t offs = 0;
++        ptrdiff_t offs = 0;
+         for (size_t y = 0; y < dst_height; y++) {
+             const int16_t *p1p = get_line(src, offs - 4 * STRIPE_WIDTH, step);
+             const int16_t *p1n = get_line(src, offs - 3 * STRIPE_WIDTH, step);
+@@ -142,7 +142,7 @@ void SUFFIX(ass_expand_horz)(int16_t *dst, const int16_t *src,
+     size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
+     size_t step = STRIPE_WIDTH * src_height;
+ 
+-    size_t offs = 0;
++    ptrdiff_t offs = 0;
+     int16_t buf[2 * STRIPE_WIDTH];
+     int16_t *ptr = buf + STRIPE_WIDTH;
+     for (size_t x = STRIPE_WIDTH; x < dst_width; x += 2 * STRIPE_WIDTH) {
+@@ -182,7 +182,7 @@ void SUFFIX(ass_expand_vert)(int16_t *dst, const int16_t *src,
+     size_t step = STRIPE_WIDTH * src_height;
+ 
+     for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
+-        size_t offs = 0;
++        ptrdiff_t offs = 0;
+         for (size_t y = 0; y < dst_height; y += 2) {
+             const int16_t *p1 = get_line(src, offs - 2 * STRIPE_WIDTH, step);
+             const int16_t *z0 = get_line(src, offs - 1 * STRIPE_WIDTH, step);
+@@ -213,7 +213,7 @@ static inline void SUFFIX(blur_horz)(int16_t *dst, const int16_t *src,
+     size_t size = ((src_width + STRIPE_MASK) & ~STRIPE_MASK) * src_height;
+     size_t step = STRIPE_WIDTH * src_height;
+ 
+-    size_t offs = 0;
++    ptrdiff_t offs = 0;
+     int16_t buf[3 * STRIPE_WIDTH];
+     int16_t *ptr = buf + 2 * STRIPE_WIDTH;
+     for (size_t x = 0; x < dst_width; x += STRIPE_WIDTH) {
+@@ -244,7 +244,7 @@ static inline void SUFFIX(blur_vert)(int16_t *dst, const int16_t *src,
+     size_t step = STRIPE_WIDTH * src_height;
+ 
+     for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
+-        size_t offs = 0;
++        ptrdiff_t offs = 0;
+         for (size_t y = 0; y < dst_height; y++) {
+             int32_t acc[STRIPE_WIDTH];
+             for (int k = 0; k < STRIPE_WIDTH; k++)
+diff --git a/libass/c/c_blur.c b/libass/c/c_blur.c
+index 2c470f787..fdc45435a 100644
+--- a/libass/c/c_blur.c
++++ b/libass/c/c_blur.c
+@@ -30,9 +30,9 @@ static int16_t dither_line[32] = {
+     56, 24, 56, 24, 56, 24, 56, 24, 56, 24, 56, 24, 56, 24, 56, 24,
+ };
+ 
+-inline static const int16_t *get_line(const int16_t *ptr, size_t offs, size_t size)
++inline static const int16_t *get_line(const int16_t *ptr, ptrdiff_t offs, size_t size)
+ {
+-    return offs < size ? ptr + offs : zero_line;
++    return (offs >= 0 && (size_t)offs < size) ? ptr + offs : zero_line;
+ }
+ 
+ static inline int16_t shrink_func(int16_t p1p, int16_t p1n,
