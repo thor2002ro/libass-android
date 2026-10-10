@@ -1,5 +1,6 @@
 package io.github.peerless2012.ass
 
+import io.github.peerless2012.ass.kt.BuildConfig
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -12,7 +13,17 @@ class Ass : AutoCloseable {
         }
 
         @JvmStatic
+        val version: String = BuildConfig.VERSION_NAME
+
+        @JvmStatic
+        val libraryVersion: String
+            get() = nativeAssLibraryVersion().toLibassVersion()
+
+        @JvmStatic
         external fun nativeAssInit(): Long
+
+        @JvmStatic
+        external fun nativeAssLibraryVersion(): Int
 
         @JvmStatic
         external fun nativeAssAddFont(ptr: Long, name: String, buffer: ByteArray)
@@ -77,4 +88,9 @@ class Ass : AutoCloseable {
         release()
     }
 
+}
+
+private fun Int.toLibassVersion(): String {
+    val version = toUInt().toString(16).padStart(8, '0')
+    return "${version[0]}.${version.substring(1, 3).toInt()}.${version.substring(3, 5).toInt()}"
 }
