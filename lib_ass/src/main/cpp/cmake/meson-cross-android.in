@@ -1,0 +1,22 @@
+[binaries]
+c = ['@CMAKE_C_COMPILER@', '--target=@CMAKE_C_COMPILER_TARGET@']
+cpp = ['@CMAKE_CXX_COMPILER@', '--target=@CMAKE_CXX_COMPILER_TARGET@']
+ar = '@CMAKE_AR@'
+strip = '@CMAKE_STRIP@'
+pkg-config = 'pkg-config'
+
+[host_machine]
+system = 'android'
+cpu_family = '@MESON_CPU_FAMILY@'
+cpu = '@MESON_CPU_FAMILY@'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+
+[built-in options]
+c_args = @LIBASS_MESON_COMPILE_ARGS@
+cpp_args = @LIBASS_MESON_COMPILE_ARGS@
+c_link_args = @LIBASS_MESON_LINK_ARGS@
+cpp_link_args = @LIBASS_MESON_LINK_ARGS@
+b_staticpic = true
