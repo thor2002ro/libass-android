@@ -36,10 +36,10 @@ index a5520e7cce523e8eb9287df564f41dec2434369f..dab69249a99df462c83bc154148f3a59
      return engine;
 diff --git a/libass/c/c_blur_neon.c b/libass/c/c_blur_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e13b0c246aa31d6e262b68bf6448f265d1cdf88
+index 0000000000000000000000000000000000000000..83085bef093bbccee5d1fc7edc23d8e9d11853aa
 --- /dev/null
 +++ b/libass/c/c_blur_neon.c
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,357 @@
 +#include "config.h"
 +
 +#if defined(__arm__) && defined(__ARM_NEON)
@@ -321,29 +321,67 @@ index 0000000000000000000000000000000000000000..1e13b0c246aa31d6e262b68bf6448f26
 +    }
 +}
 +
++static inline void expand_vert_edge_neon(
++    const int16_t *src, ptrdiff_t offs, size_t step,
++    uint16x8_t *rp, uint16x8_t *rn)
++{
++    expand8(
++        vreinterpretq_u16_s16(vld1q_s16(
++            get_line(src, offs - 2 * STRIPE_WIDTH, step))),
++        vreinterpretq_u16_s16(vld1q_s16(
++            get_line(src, offs - 1 * STRIPE_WIDTH, step))),
++        vreinterpretq_u16_s16(vld1q_s16(
++            get_line(src, offs, step))),
++        rp, rn);
++}
++
++static inline void expand_vert_inner_neon(
++    const int16_t *center, uint16x8_t *rp, uint16x8_t *rn)
++{
++    expand8(
++        vreinterpretq_u16_s16(vld1q_s16(center - 2 * STRIPE_WIDTH)),
++        vreinterpretq_u16_s16(vld1q_s16(center - 1 * STRIPE_WIDTH)),
++        vreinterpretq_u16_s16(vld1q_s16(center)),
++        rp, rn);
++}
++
 +void ass_expand_vert16_neon(int16_t *restrict dst,
-+                             const int16_t *restrict src,
-+                             size_t src_width, size_t src_height)
++                            const int16_t *restrict src,
++                            size_t src_width, size_t src_height)
 +{
 +    ASSUME(!((uintptr_t) dst % ALIGNMENT));
 +    ASSUME(!((uintptr_t) src % ALIGNMENT));
 +    ASSUME(src_width > 0 && src_height > 0);
 +
-+    size_t dst_height = 2 * src_height + 4;
++    size_t dst_pairs = src_height + 2;
 +    size_t step = STRIPE_WIDTH * src_height;
 +
 +    for (size_t x = 0; x < src_width; x += STRIPE_WIDTH) {
 +        ptrdiff_t offs = 0;
-+        for (size_t y = 0; y < dst_height; y += 2) {
++        size_t y = 0;
++        for (; y < 2; y++) {
 +            uint16x8_t rp, rn;
-+            expand8(
-+                vreinterpretq_u16_s16(vld1q_s16(
-+                    get_line(src, offs - 2 * STRIPE_WIDTH, step))),
-+                vreinterpretq_u16_s16(vld1q_s16(
-+                    get_line(src, offs - 1 * STRIPE_WIDTH, step))),
-+                vreinterpretq_u16_s16(vld1q_s16(
-+                    get_line(src, offs, step))),
-+                &rp, &rn);
++            expand_vert_edge_neon(src, offs, step, &rp, &rn);
++            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
++            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
++            dst += 2 * STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++
++        // Pairs 2 through height - 1 consume only real source rows, so their
++        // three loads can bypass transparent-edge selection.
++        for (; y < src_height; y++) {
++            uint16x8_t rp, rn;
++            expand_vert_inner_neon(src + offs, &rp, &rn);
++            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
++            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
++            dst += 2 * STRIPE_WIDTH;
++            offs += STRIPE_WIDTH;
++        }
++
++        for (; y < dst_pairs; y++) {
++            uint16x8_t rp, rn;
++            expand_vert_edge_neon(src, offs, step, &rp, &rn);
 +            vst1q_s16(dst, vreinterpretq_s16_u16(rp));
 +            vst1q_s16(dst + STRIPE_WIDTH, vreinterpretq_s16_u16(rn));
 +            dst += 2 * STRIPE_WIDTH;
