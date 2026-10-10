@@ -1,5 +1,7 @@
 package io.github.peerless2012.ass
 
+import java.nio.ByteBuffer
+
 /**
  * Batched libass output.
  *
@@ -13,11 +15,15 @@ package io.github.peerless2012.ass
  * the quad metadata.
  */
 class AssAtlasFrame(
-    val pages: Array<ByteArray>?,
+    val pages: Array<ByteBuffer>?,
     val pageWidths: IntArray,
     val pageHeights: IntArray,
     val quads: IntArray,
     val changed: Int,
+    /** `left, top, width, height` for each page; empty means a full upload. */
+    val dirtyRects: IntArray,
+    /** Monotonic native content generation used to reject skipped dirty updates. */
+    val contentSerial: Long,
 ) {
     val imageCount: Int
         get() = quads.size / QUAD_STRIDE
@@ -46,6 +52,8 @@ class AssAtlasFrame(
             pageHeights = IntArray(0),
             quads = IntArray(0),
             changed = CHANGE_NONE,
+            dirtyRects = IntArray(0),
+            contentSerial = 0L,
         )
     }
 }
