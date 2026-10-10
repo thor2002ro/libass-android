@@ -11,6 +11,10 @@ import io.github.peerless2012.ass.AssAtlasFrame
 import io.github.peerless2012.ass.media.AssPerformanceStatsCollector
 import java.nio.ByteBuffer
 
+internal fun copyBufferPreservingPosition(destination: ByteBuffer, source: ByteBuffer) {
+    destination.put(source.duplicate())
+}
+
 /** Draws libass alpha-atlas pages into the currently bound framebuffer. */
 @OptIn(UnstableApi::class)
 internal class AssAtlasGlRenderer(
@@ -116,6 +120,7 @@ internal class AssAtlasGlRenderer(
         originX: Int = 0,
         originY: Int = 0,
         forceRedraw: Boolean = false,
+        frameValidated: Boolean = false,
     ): DrawResult {
         check(initialized) { "AssAtlasGlRenderer.initialize() must be called first" }
         currentMode?.let { statsCollector?.recordOpenGlMode(it) }
@@ -129,7 +134,7 @@ internal class AssAtlasGlRenderer(
         }
 
         if (frame != null && frame.changed != AssAtlasFrame.CHANGE_NONE) {
-            if (!isFrameCompatible(frame, sourceWidth, sourceHeight)) {
+            if (!frameValidated && !isFrameCompatible(frame, sourceWidth, sourceHeight)) {
                 return DrawResult.NEEDS_REPLACEMENT
             }
             when (frame.changed) {
@@ -149,7 +154,7 @@ internal class AssAtlasGlRenderer(
                 }
             }
 
-            check(geometry.update(frame, targetWidth, targetHeight, originX, originY))
+            geometry.updateValidated(frame, targetWidth, targetHeight, originX, originY)
             uploadGeometry()
             hasContent = geometry.vertexCount > 0
         }
@@ -232,8 +237,8 @@ internal class AssAtlasGlRenderer(
             allowIncremental = supportsIncrementalUpdates,
             uploadedContentSerial = uploadedContentSerial.takeIf { it != 0L },
         )
-        val valid = validation is AssAtlasFrameValidator.ValidationResult.Valid &&
-            geometry.isValid(frame, sourceWidth, sourceHeight)
+        val valid = sourceWidth > 0 && sourceHeight > 0 &&
+            validation is AssAtlasFrameValidator.ValidationResult.Valid
         if (!valid) Log.w(TAG, "Ignoring incompatible libass atlas frame: $validation")
         return valid
     }
@@ -548,7 +553,7 @@ internal class AssAtlasGlRenderer(
             if (mapped == null) return disablePbos()
             mapped.clear()
             mapped.limit(required)
-            mapped.put(source)
+            copyBufferPreservingPosition(mapped, source)
             if (!GLES30.glUnmapBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER)) return disablePbos()
             GLES30.glTexSubImage2D(
                 GLES20.GL_TEXTURE_2D,

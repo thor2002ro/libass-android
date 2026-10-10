@@ -4,6 +4,8 @@ import io.github.peerless2012.ass.AssAtlasFrame
 
 /** Validates a complete native atlas payload before any persistent GL state changes. */
 internal object AssAtlasFrameValidator {
+    const val MAX_QUADS = 16_383
+
     sealed interface ValidationResult {
         data object Valid : ValidationResult
         data class Invalid(val reason: String) : ValidationResult
@@ -56,6 +58,7 @@ internal object AssAtlasFrameValidator {
     }
 
     private fun validatePagesAndQuads(frame: AssAtlasFrame): ValidationResult? {
+        if (frame.imageCount > MAX_QUADS) return invalid("too many quads")
         repeat(frame.pageCount) { page ->
             if (frame.pageWidth(page) <= 0 || frame.pageHeight(page) <= 0) {
                 return invalid("non-positive page")

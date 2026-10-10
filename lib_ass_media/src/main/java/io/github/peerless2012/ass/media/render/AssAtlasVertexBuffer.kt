@@ -62,6 +62,17 @@ internal class AssAtlasVertexBuffer {
         originY: Int = 0,
     ): Boolean {
         if (!isValid(frame, sourceWidth, sourceHeight)) return false
+        updateValidated(frame, sourceWidth, sourceHeight, originX, originY)
+        return true
+    }
+
+    fun updateValidated(
+        frame: AssAtlasFrame,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        originX: Int = 0,
+        originY: Int = 0,
+    ) {
         val imageCount = frame.imageCount
         vertexBytes = imageCount * VERTICES_PER_QUAD * VERTEX_STRIDE_BYTES
         indexBytes = imageCount * INDICES_PER_QUAD * BYTES_PER_INDEX
@@ -127,7 +138,6 @@ internal class AssAtlasVertexBuffer {
         }
         vertices.flip()
         indices.flip()
-        return true
     }
 
     fun clear() {
@@ -181,7 +191,7 @@ internal class AssAtlasVertexBuffer {
         const val POSITION_OFFSET_BYTES = 0
         const val TEX_COORD_OFFSET_BYTES = 8
         const val COLOR_OFFSET_BYTES = 16
-        private const val MAX_QUADS = 16_383
+        private const val MAX_QUADS = AssAtlasFrameValidator.MAX_QUADS
         private const val MIN_VERTEX_CAPACITY_BYTES = 1_280
         private const val MIN_INDEX_CAPACITY_BYTES = 384
 
