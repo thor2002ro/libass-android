@@ -157,5 +157,9 @@ target_link_libraries(ass
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
     target_compile_options(ass PRIVATE ${LIBASS_COMPILE_FLAGS})
-    target_link_options(ass PRIVATE ${LIBASS_OPT_FLAGS})
+    target_link_options(ass PRIVATE
+        ${LIBASS_OPT_FLAGS}
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libass.map.txt"
+        "-Wl,-soname,libass.so"
+    )
 endif()

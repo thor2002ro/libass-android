@@ -223,6 +223,38 @@ perl -pi -e 's/\r$//' \
 ./.gradlew-wsl :lib_ass:clean
 ./.gradlew-wsl :lib_ass:applyLibassPatches
 
+libass_commit="$(git -C "$sources_dir/ass" rev-parse HEAD)"
+[[ "$libass_commit" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Could not resolve the exact libass commit." >&2
+    exit 1
+}
+patch_index="$(mktemp)"
+rm -f "$patch_index"
+GIT_INDEX_FILE="$patch_index" git -C "$sources_dir/ass" read-tree HEAD
+GIT_INDEX_FILE="$patch_index" git -C "$sources_dir/ass" add -A
+patch_tree="$(GIT_INDEX_FILE="$patch_index" git -C "$sources_dir/ass" write-tree)"
+rm -f "$patch_index"
+[[ "$patch_tree" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Could not resolve the patched libass tree." >&2
+    exit 1
+}
+libass_version="$(tr -d '\r[:space:]' < "$sources_dir/ass/RELEASEVERSION")"
+[[ "$libass_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+	echo "Could not resolve LIBASS_VERSION: $libass_version" >&2
+	exit 1
+}
+libass_version_hex="$(sed -n 's/^#define LIBASS_VERSION[[:space:]]\+//p' "$sources_dir/ass/libass/ass.h" | head -n 1 | tr -d '[:space:]')"
+[[ "$libass_version_hex" =~ ^0x[0-9A-Fa-f]{8}$ ]] || {
+	echo "Could not resolve hexadecimal LIBASS_VERSION: $libass_version_hex" >&2
+	exit 1
+}
+wrapper_version="$(sed -n 's/^VERSION_NAME=//p' "$repo/gradle.properties" | head -n 1 | tr -d '\r[:space:]')"
+[[ "$wrapper_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-thor$ ]] || {
+    echo "Invalid libass Android version: $wrapper_version" >&2
+    exit 1
+}
+provider_version="$wrapper_version.${libass_commit:0:12}"
+
 (cd "$sources_dir/unibreak" && NOCONFIGURE=1 ./autogen.sh)
 (cd "$sources_dir/fribidi" && NOCONFIGURE=1 ./autogen.sh)
 (cd "$sources_dir/ass" && ./autogen.sh)
@@ -231,5 +263,48 @@ perl -pi -e 's/\r$//' \
 ./.gradlew-wsl :lib_ass:assembleRelease
 
 mkdir -p OUTPUT
-cp -f lib_ass/build/outputs/aar/lib_ass-release.aar OUTPUT/lib_ass-release.aar
-echo "Saved $repo/OUTPUT/lib_ass-release.aar"
+provider_aar="$repo/OUTPUT/lib_ass-release.aar"
+cp -f lib_ass/build/outputs/aar/lib_ass-release.aar "$provider_aar"
+
+metadata_root="$(mktemp -d)"
+mkdir -p "$metadata_root/META-INF"
+cat > "$metadata_root/META-INF/libass-android-provider.properties" <<EOF
+group=io.github.peerless2012
+artifact=libass-android-provider
+version=$provider_version
+libass_version=$libass_version
+libass_version_hex=$libass_version_hex
+libass_commit=$libass_commit
+patch_tree=$patch_tree
+ndk_version=$android_ndk_version
+abis=armeabi-v7a,arm64-v8a,x86,x86_64
+optimization=O3,thin-lto,armv7-neon,armv7-thumb,arm64-neon
+EOF
+jar --update --file "$provider_aar" -C "$metadata_root" META-INF
+rm -rf "$metadata_root"
+
+maven_version_dir="$repo/OUTPUT/maven/io/github/peerless2012/libass-android-provider/$provider_version"
+mkdir -p "$maven_version_dir"
+cp -f "$provider_aar" "$maven_version_dir/libass-android-provider-$provider_version.aar"
+cat > "$maven_version_dir/libass-android-provider-$provider_version.pom" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.github.peerless2012</groupId>
+  <artifactId>libass-android-provider</artifactId>
+  <version>$provider_version</version>
+  <packaging>aar</packaging>
+</project>
+EOF
+cat > "$repo/OUTPUT/libass-provider.properties" <<EOF
+group=io.github.peerless2012
+artifact=libass-android-provider
+version=$provider_version
+libass_version=$libass_version
+libass_version_hex=$libass_version_hex
+libass_commit=$libass_commit
+patch_tree=$patch_tree
+ndk_version=$android_ndk_version
+EOF
+
+echo "Saved shared libass provider $provider_version to $provider_aar"
