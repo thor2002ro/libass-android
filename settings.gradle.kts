@@ -11,6 +11,17 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+
+if (!file("local.properties").exists() &&
+    System.getenv("ANDROID_HOME").isNullOrBlank() &&
+    System.getenv("ANDROID_SDK_ROOT").isNullOrBlank()
+) {
+    System.getenv("LOCALAPPDATA")
+        ?.let { file("$it/Android/Sdk") }
+        ?.takeIf { it.isDirectory }
+        ?.let { file("local.properties").writeText("sdk.dir=${it.invariantSeparatorsPath}\n") }
+}
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
