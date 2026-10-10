@@ -157,6 +157,13 @@ class AssHandler(
         resetInternal()
     }
 
+    /** Creates the native renderer early so subtitle track setup does not pay its startup cost. */
+    @Synchronized
+    fun prepareRenderer() {
+        if (released) return
+        createRenderIfNeeded()
+    }
+
     private fun resetInternal(updatePlayer: Boolean = true) {
         if (updatePlayer) overlayManager?.disable()
         render?.release()
