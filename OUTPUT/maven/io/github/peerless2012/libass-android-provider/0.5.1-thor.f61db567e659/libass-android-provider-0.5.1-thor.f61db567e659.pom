@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.github.peerless2012</groupId>
+  <artifactId>libass-android-provider</artifactId>
+  <version>0.5.1-thor.f61db567e659</version>
+  <packaging>aar</packaging>
+</project>
