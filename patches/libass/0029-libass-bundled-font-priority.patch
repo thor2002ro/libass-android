@@ -1,0 +1,106 @@
+Subject: [PATCH] Opt in to embedded, bundled, then device font selection
+
+LIBASS_BUNDLED_FONT_DIR enables the application policy without changing the ABI
+or the default behavior of other consumers. The directory must be absolute,
+without a trailing slash. Bundled families come from the provider's sans-serif
+substitutions; fonts outside that exact directory tree cannot enter this tier.
+
+diff --git a/libass/ass_fontselect.c b/libass/ass_fontselect.c
+--- a/libass/ass_fontselect.c
++++ b/libass/ass_fontselect.c
+@@ -714,7 +714,8 @@ find_font(ASS_FontSelector *priv,
+           ASS_FontProviderMetaData meta, bool match_extended_family,
+           unsigned bold, unsigned italic,
+           int *index, char **postscript_name, int *uid, ASS_FontStream *stream,
+-          uint32_t code, bool *name_match)
++          uint32_t code, bool *name_match,
++          ASS_FontProvider *only_provider, const char *only_directory)
+ {
+     ASS_FontInfo req = {0};
+     ASS_FontInfo *selected = NULL;
+@@ -734,6 +735,14 @@ find_font(ASS_FontSelector *priv,
+ 
+         for (int x = 0; x < priv->n_font; x++) {
+             ASS_FontInfo *font = &priv->font_infos[x];
++            if (only_provider && font->provider != only_provider)
++                continue;
++            if (only_directory) {
++                size_t len = strlen(only_directory);
++                if (!font->path || strncmp(font->path, only_directory, len) ||
++                        font->path[len] != '/')
++                    continue;
++            }
+             unsigned score = UINT_MAX;
+ 
+             if (matches_family_name(font, fullname, match_extended_family)) {
+@@ -832,6 +841,34 @@ static char *select_font(ASS_FontSelector *priv,
+         .fullnames  = (char **)&family,
+     };
+ 
++    // Opt-in application policy: matching attachments, bundled sans, then
++    // normal provider selection. Keep glyph checks and style matching in each
++    // tier, and leave other consumers unchanged when the directory is unset.
++    const char *bundled_directory = getenv("LIBASS_BUNDLED_FONT_DIR");
++    if (bundled_directory && bundled_directory[0] && priv->embedded_provider) {
++        result = find_font(priv, default_meta, match_extended_family,
++                           bold, italic, index, postscript_name, uid,
++                           stream, code, &name_match,
++                           priv->embedded_provider, NULL);
++        if (result)
++            return result;
++
++        ASS_FontProviderMetaData bundled_meta = {0};
++        if (default_provider && default_provider->funcs.get_substitutions)
++            default_provider->funcs.get_substitutions(default_provider->priv,
++                                                      "sans-serif", &bundled_meta);
++        if (bundled_meta.n_fullname)
++            result = find_font(priv, bundled_meta, match_extended_family,
++                               bold, italic, index, postscript_name, uid,
++                               stream, code, &name_match, NULL, bundled_directory);
++        for (int i = 0; i < bundled_meta.n_fullname; i++)
++            free(bundled_meta.fullnames[i]);
++        free(bundled_meta.fullnames);
++        if (result)
++            return result;
++        name_match = false;
++    }
++
+     // Get a list of substitutes if applicable, and use it for matching.
+     if (default_provider && default_provider->funcs.get_substitutions) {
+         default_provider->funcs.get_substitutions(default_provider->priv,
+@@ -845,7 +882,7 @@ static char *select_font(ASS_FontSelector *priv,
+ 
+     result = find_font(priv, meta, match_extended_family,
+                        bold, italic, index, postscript_name, uid,
+-                       stream, code, &name_match);
++                       stream, code, &name_match, NULL, NULL);
+ 
+     // If no matching font was found, it might not exist in the font list
+     // yet. Call the match_fonts callback to fill in the missing fonts
+@@ -861,7 +898,7 @@ static char *select_font(ASS_FontSelector *priv,
+         }
+         result = find_font(priv, meta, match_extended_family,
+                            bold, italic, index, postscript_name, uid,
+-                           stream, code, &name_match);
++                           stream, code, &name_match, NULL, NULL);
+     }
+ 
+     // cleanup
+diff --git a/libass/ass_fontconfig.c b/libass/ass_fontconfig.c
+--- a/libass/ass_fontconfig.c
++++ b/libass/ass_fontconfig.c
+@@ -369,6 +369,14 @@ ass_fontconfig_add_provider(ASS_Library *lib, ASS_FontSelector *selector,
+     if (fc == NULL)
+         return NULL;
+ 
++    // Opt-in shared policy also covers callers such as mpv that pass their
++    // own configuration explicitly instead of using FONTCONFIG_FILE.
++    const char *bundled_directory = getenv("LIBASS_BUNDLED_FONT_DIR");
++    const char *shared_config = getenv("FONTCONFIG_FILE");
++    if (bundled_directory && bundled_directory[0] &&
++            shared_config && shared_config[0])
++        config = shared_config;
++
+     // build and load fontconfig configuration
+     fc->config = FcConfigCreate();
+ 
