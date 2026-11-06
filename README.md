@@ -28,10 +28,10 @@ Media3 integration that adds ASS subtitle rendering to a Media3 player through `
 
 | Setting | Value |
 |---|---|
-| Android NDK | `29.0.14206865` from `gradle.properties` |
+| Android NDK | `30.0.16248370` from `gradle.properties` |
 | Compiler | Android NDK Clang |
 | Minimum Android API | 21 |
-| CMake | 3.22.1 |
+| CMake | 3.31.6 |
 | ABIs | `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` |
 | Release optimization | Unified `-O3 -flto=thin` compile and link flags for every ABI |
 | Arm SIMD | NEON is enabled by the NDK for both Arm ABIs; ARMv7 also receives explicit NEON and Thumb flags |

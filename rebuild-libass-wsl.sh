@@ -13,7 +13,7 @@ android_sdk_packages=(
     "platform-tools"
     "platforms;android-36"
     "build-tools;36.0.0"
-    "cmake;3.22.1"
+    "cmake;3.31.6"
     "ndk;$android_ndk_version"
 )
 

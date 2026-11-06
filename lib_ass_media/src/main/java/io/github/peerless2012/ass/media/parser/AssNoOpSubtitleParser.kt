@@ -1,10 +1,10 @@
 package io.github.peerless2012.ass.media.parser
 
 import androidx.media3.common.Format
-import androidx.media3.common.util.Consumer
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.text.CuesWithTiming
 import androidx.media3.extractor.text.SubtitleParser
+import java.util.function.Consumer
 
 /**
  * No operation subtitle parser.

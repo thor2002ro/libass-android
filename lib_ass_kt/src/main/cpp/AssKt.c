@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ass/ass.h"
-#include "fontconfig/fontconfig.h"
 #include "AssOverlay.h"
 
 #define LOG_TAG "SubtitleRenderer"

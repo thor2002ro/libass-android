@@ -1,11 +1,11 @@
 [versions]
-agp = "9.4.1"
-annotation = "1.10.0"
+agp = "9.5.1"
+annotation = "1.11.0"
 annotation-experimental = "1.6.0"
 junit = "4.13.2"
 junitVersion = "1.3.0"
 espressoCore = "3.7.0"
-media3 = "1.11.0"
+media3 = "1.12.0-alpha02"
 
 [libraries]
 androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "annotation"}
