@@ -2,7 +2,7 @@ set(LIBASS_OPT_FLAGS)
 set(LIBASS_ABI_COMPILE_FLAGS)
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
-    set(LIBASS_OPT_FLAGS -O3 -flto=thin)
+    set(LIBASS_OPT_FLAGS -O3 -flto=full)
     if(ANDROID_ABI STREQUAL "armeabi-v7a")
         set(LIBASS_ABI_COMPILE_FLAGS -mfpu=neon -mthumb)
     endif()

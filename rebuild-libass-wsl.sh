@@ -266,6 +266,17 @@ mkdir -p OUTPUT
 provider_aar="$repo/OUTPUT/lib_ass-release.aar"
 cp -f lib_ass/build/outputs/aar/lib_ass-release.aar "$provider_aar"
 
+strip_root="$(mktemp -d)"
+unzip -q "$provider_aar" -d "$strip_root"
+llvm_strip="$ANDROID_SDK_ROOT/ndk/$android_ndk_version/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+while IFS= read -r -d '' library; do
+    "$llvm_strip" --strip-unneeded "$library"
+done < <(find "$strip_root" -type f -name '*.so' -print0)
+stripped_aar="$(mktemp --suffix=.aar)"
+jar --create --file "$stripped_aar" -C "$strip_root" .
+mv -f "$stripped_aar" "$provider_aar"
+rm -rf "$strip_root"
+
 metadata_root="$(mktemp -d)"
 mkdir -p "$metadata_root/META-INF"
 cat > "$metadata_root/META-INF/libass-android-provider.properties" <<EOF
@@ -278,7 +289,7 @@ libass_commit=$libass_commit
 patch_tree=$patch_tree
 ndk_version=$android_ndk_version
 abis=armeabi-v7a,arm64-v8a,x86,x86_64
-optimization=O3,thin-lto,armv7-neon,armv7-thumb,arm64-neon
+optimization=O3,full-lto,armv7-neon,armv7-thumb,arm64-neon
 EOF
 jar --update --file "$provider_aar" -C "$metadata_root" META-INF
 rm -rf "$metadata_root"
