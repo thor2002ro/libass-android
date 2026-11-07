@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "io.github.peerless2012.exo"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = providers.gradleProperty("androidNdkVersion").get()
 
     defaultConfig {

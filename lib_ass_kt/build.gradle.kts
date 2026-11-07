@@ -11,7 +11,7 @@ val prebuiltLibassAar = rootProject.layout.projectDirectory.file("OUTPUT/lib_ass
 
 android {
     namespace = "io.github.peerless2012.ass.kt"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = providers.gradleProperty("androidNdkVersion").get()
 
     defaultConfig {

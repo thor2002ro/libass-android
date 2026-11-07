@@ -124,7 +124,7 @@ tasks.configureEach {
 
 android {
     namespace = "io.github.peerless2012.ass"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = providers.gradleProperty("androidNdkVersion").get()
 
     defaultConfig {
